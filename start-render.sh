@@ -1,22 +1,53 @@
 #!/bin/bash
+set -euo pipefail
 
-# 1. 动态注入中转站和自定义模型配置
-# 底层依赖基于我们传进来的 ENV 变量
-bun run src/cli.ts config set openai.api_key "$PROXY_API_KEY"
-bun run src/cli.ts config set openai.base_url "$PROXY_BASE_URL"
+export PATH="$PWD/node_modules/.bin:$PATH"
 
-# 如果你想用自定义生成模型和向量模型，解除下面两行的注释并修改
-bun run src/cli.ts config set default_model "openai:mistralai/mistral-medium-3.5-128b"
-bun run src/cli.ts config set embedding_model "openai:text-embedding-3-small"
+: "${PROXY_API_KEY:?PROXY_API_KEY is required}"
+: "${PROXY_BASE_URL:?PROXY_BASE_URL is required}"
 
-# 2. 初始化/更新数据库表结构（防呆设计，无脑跑就对了）
+mkdir -p "$HOME/.gbrain"
+
+node <<'NODE'
+const fs = require('fs');
+const path = require('path');
+
+const configPath = path.join(process.env.HOME, '.gbrain', 'config.json');
+const configDir = path.dirname(configPath);
+
+let config = {};
+if (fs.existsSync(configPath)) {
+	try {
+		config = JSON.parse(fs.readFileSync(configPath, 'utf8'));
+	} catch (error) {
+		throw new Error(`Invalid JSON in ${configPath}: ${error.message}`);
+	}
+}
+
+config.embedding_model = 'openai:text-embedding-3-small';
+config.provider_base_urls = {
+	...(config.provider_base_urls ?? {}),
+	openai: process.env.PROXY_BASE_URL,
+};
+
+fs.mkdirSync(configDir, { recursive: true });
+fs.writeFileSync(configPath, JSON.stringify(config, null, 2) + '\n', { mode: 0o600 });
+try {
+	fs.chmodSync(configPath, 0o600);
+} catch {
+	// Ignore chmod failures on filesystems that do not support it.
+}
+NODE
+
+export OPENAI_API_KEY="$PROXY_API_KEY"
+
+bun run src/cli.ts config set models.default "openai:mistralai/mistral-medium-3.5-128b"
+
 echo "Applying database migrations..."
-bun run src/cli.ts apply-migrations
+bun run src/cli.ts apply-migrations --yes --non-interactive
 
-# 3. 启动后台 Worker 进程 (负责抓取、生成向量图谱等，使用 & 挂在后台)
 echo "Starting background minions..."
 bun run src/cli.ts jobs work &
 
-# 4. 前台启动 HTTP MCP server (必须绑定 Render 分配的端口变量 $PORT)
-echo "Starting HTTP MCP Server..."
-bun run src/cli.ts serve --http --port $PORT
+echo "Starting HTTP MCP server..."
+exec bun run src/cli.ts serve --http --bind 0.0.0.0 --port "${PORT:-10000}"
