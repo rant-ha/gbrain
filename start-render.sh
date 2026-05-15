@@ -6,8 +6,8 @@ bun run src/cli.ts config set openai.api_key "$PROXY_API_KEY"
 bun run src/cli.ts config set openai.base_url "$PROXY_BASE_URL"
 
 # 如果你想用自定义生成模型和向量模型，解除下面两行的注释并修改
-# bun run src/cli.ts config set default_model "openai:your-custom-llm"
-# bun run src/cli.ts config set embedding_model "openai:your-custom-embedding-model"
+bun run src/cli.ts config set default_model "openai:mistralai/mistral-medium-3.5-128b"
+bun run src/cli.ts config set embedding_model "openai:text-embedding-3-small"
 
 # 2. 初始化/更新数据库表结构（防呆设计，无脑跑就对了）
 echo "Applying database migrations..."
