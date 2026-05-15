@@ -29,6 +29,7 @@ import { execSync } from 'child_process';
 import type { Migration, OrchestratorOpts, OrchestratorResult, OrchestratorPhaseResult } from './types.ts';
 // Bug 3 — ledger writes moved to the runner (apply-migrations.ts). The
 // orchestrator returns its result and the runner persists it.
+import { migrationCliCommand } from './cli-path.ts';
 
 // ── Phase A — Schema ────────────────────────────────────────
 //
@@ -47,7 +48,7 @@ import type { Migration, OrchestratorOpts, OrchestratorResult, OrchestratorPhase
 function phaseASchema(opts: OrchestratorOpts): OrchestratorPhaseResult {
   if (opts.dryRun) return { name: 'schema', status: 'skipped', detail: 'dry-run' };
   try {
-    execSync('gbrain init --migrate-only', { stdio: 'inherit', timeout: 600_000, env: process.env });
+    execSync(`${migrationCliCommand()} init --migrate-only`, { stdio: 'inherit', timeout: 600_000, env: process.env });
     return { name: 'schema', status: 'complete' };
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
@@ -64,7 +65,7 @@ function phaseBBackfill(opts: OrchestratorOpts): OrchestratorPhaseResult {
     // `--include-frontmatter` is the v0.13 flag that enables the canonical
     // frontmatter link extractor. Default-OFF in the CLI for back-compat;
     // the migration explicitly opts in because this is the canonical backfill.
-    execSync('gbrain extract links --source db --include-frontmatter', {
+    execSync(`${migrationCliCommand()} extract links --source db --include-frontmatter`, {
       stdio: 'inherit',
       timeout: 1_800_000,  // 30 min hard cap; typical 2-5 min on 46K pages
       env: process.env,
@@ -89,7 +90,7 @@ function phaseCVerify(opts: OrchestratorOpts): OrchestratorPhaseResult {
     // docs-only brains, and brains with no entity pages legitimately
     // produce 0. Phase B's own stdout shows `Links: created N` which is
     // the authoritative signal — user sees it during upgrade.
-    const out = execSync('gbrain call get_stats', {
+    const out = execSync(`${migrationCliCommand()} call get_stats`, {
       encoding: 'utf-8', timeout: 60_000, env: process.env,
     });
     const parsed = JSON.parse(out) as { link_count?: number; page_count?: number };

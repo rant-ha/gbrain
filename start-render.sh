@@ -6,6 +6,8 @@ export PATH="$PWD/node_modules/.bin:$PATH"
 : "${PROXY_API_KEY:?PROXY_API_KEY is required}"
 : "${PROXY_BASE_URL:?PROXY_BASE_URL is required}"
 
+export PROXY_API_KEY PROXY_BASE_URL
+
 mkdir -p "$HOME/.gbrain"
 
 node <<'NODE'

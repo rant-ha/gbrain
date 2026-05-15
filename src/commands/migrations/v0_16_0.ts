@@ -23,6 +23,7 @@ import type { Migration, OrchestratorOpts, OrchestratorResult, OrchestratorPhase
 import { appendCompletedMigration } from '../../core/preferences.ts';
 import { loadConfig, toEngineConfig } from '../../core/config.ts';
 import { createEngine } from '../../core/engine-factory.ts';
+import { migrationCliCommand } from './cli-path.ts';
 
 const REQUIRED_TABLES = ['subagent_messages', 'subagent_tool_executions', 'subagent_rate_leases'] as const;
 
@@ -31,7 +32,7 @@ const REQUIRED_TABLES = ['subagent_messages', 'subagent_tool_executions', 'subag
 function phaseASchema(opts: OrchestratorOpts): OrchestratorPhaseResult {
   if (opts.dryRun) return { name: 'schema', status: 'skipped', detail: 'dry-run' };
   try {
-    execSync('gbrain init --migrate-only', { stdio: 'inherit', timeout: 60_000, env: process.env });
+    execSync(`${migrationCliCommand()} init --migrate-only`, { stdio: 'inherit', timeout: 60_000, env: process.env });
     return { name: 'schema', status: 'complete' };
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);

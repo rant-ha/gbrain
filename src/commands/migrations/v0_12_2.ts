@@ -20,10 +20,11 @@
  *   D. Record   — append completed.jsonl.
  */
 
-import { execSync } from 'child_process';
+import { execSync } from 'node:child_process';
 import type { Migration, OrchestratorOpts, OrchestratorResult, OrchestratorPhaseResult } from './types.ts';
 import { childGlobalFlags } from '../../core/cli-options.ts';
 // Bug 3 — ledger writes moved to the runner (apply-migrations.ts).
+import { migrationCliCommand } from './cli-path.ts';
 
 // ── Phase A — Schema ────────────────────────────────────────
 
@@ -32,7 +33,7 @@ function phaseASchema(opts: OrchestratorOpts): OrchestratorPhaseResult {
   try {
     // Propagate global progress flags so the child shows the same mode the
     // parent orchestrator is running in.
-    execSync('gbrain init --migrate-only' + childGlobalFlags(), { stdio: 'inherit', timeout: 60_000, env: process.env });
+    execSync(`${migrationCliCommand()} init --migrate-only${childGlobalFlags()}`, { stdio: 'inherit', timeout: 60_000, env: process.env });
     return { name: 'schema', status: 'complete' };
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
@@ -46,7 +47,7 @@ function phaseBRepair(opts: OrchestratorOpts): OrchestratorPhaseResult {
   if (opts.dryRun) return { name: 'jsonb_repair', status: 'skipped', detail: 'dry-run' };
   try {
     // stdio: 'inherit' — child's stderr progress streams straight through.
-    execSync('gbrain repair-jsonb' + childGlobalFlags(), { stdio: 'inherit', timeout: 600_000, env: process.env });
+    execSync(`${migrationCliCommand()} repair-jsonb${childGlobalFlags()}`, { stdio: 'inherit', timeout: 600_000, env: process.env });
     return { name: 'jsonb_repair', status: 'complete' };
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
@@ -64,7 +65,7 @@ function phaseCVerify(opts: OrchestratorOpts): OrchestratorPhaseResult {
     // Any accidental stdout progress from the child would break JSON.parse
     // (per Codex review #12). NOTE: we deliberately do NOT pass
     // --progress-json here — this child is parsed, not watched.
-    const out = execSync('gbrain repair-jsonb --dry-run --json', {
+    const out = execSync(`${migrationCliCommand()} repair-jsonb --dry-run --json`, {
       encoding: 'utf-8', timeout: 60_000, env: process.env,
       stdio: ['ignore', 'pipe', 'inherit'],
     });

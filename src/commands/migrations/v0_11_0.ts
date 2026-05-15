@@ -20,15 +20,16 @@
  *                pending-host-work items remain).
  */
 
-import { existsSync, readFileSync, writeFileSync, mkdirSync, appendFileSync, lstatSync, statSync, realpathSync } from 'fs';
-import { join, resolve, dirname } from 'path';
-import { execSync } from 'child_process';
+import { existsSync, readFileSync, writeFileSync, mkdirSync, appendFileSync, lstatSync, statSync, realpathSync } from 'node:fs';
+import { join, resolve, dirname } from 'node:path';
+import { execSync } from 'node:child_process';
 import { childGlobalFlags } from '../../core/cli-options.ts';
 import type { Migration, OrchestratorOpts, OrchestratorResult, OrchestratorPhaseResult } from './types.ts';
 import { savePreferences, loadPreferences } from '../../core/preferences.ts';
 // Bug 3 — appendCompletedMigration moved to the runner (apply-migrations.ts).
 import { promptLine } from '../../core/cli-util.ts';
 import { VERSION } from '../../version.ts';
+import { migrationCliCommand } from './cli-path.ts';
 
 const BUILTIN_HANDLERS = new Set(['sync', 'embed', 'lint', 'import', 'extract', 'backlinks', 'autopilot-cycle']);
 const AGENTS_MD_MARKER = '<!-- gbrain:subagent-routing v0.11.0 -->';
@@ -61,7 +62,7 @@ export interface PendingHostWorkEntry {
 function phaseASchema(opts: OrchestratorOpts): OrchestratorPhaseResult {
   if (opts.dryRun) return { name: 'schema', status: 'skipped', detail: 'dry-run' };
   try {
-    execSync('gbrain init --migrate-only' + childGlobalFlags(), { stdio: 'inherit', timeout: 60_000, env: process.env });
+    execSync(`${migrationCliCommand()} init --migrate-only${childGlobalFlags()}`, { stdio: 'inherit', timeout: 60_000, env: process.env });
     return { name: 'schema', status: 'complete' };
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
@@ -76,7 +77,7 @@ function phaseASchema(opts: OrchestratorOpts): OrchestratorPhaseResult {
 function phaseBSmoke(opts: OrchestratorOpts): OrchestratorPhaseResult {
   if (opts.dryRun) return { name: 'smoke', status: 'skipped', detail: 'dry-run' };
   try {
-    execSync('gbrain jobs smoke', { stdio: 'inherit', timeout: 30_000, env: process.env });
+    execSync(`${migrationCliCommand()} jobs smoke`, { stdio: 'inherit', timeout: 30_000, env: process.env });
     return { name: 'smoke', status: 'complete' };
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
@@ -397,7 +398,7 @@ function phaseFInstall(opts: OrchestratorOpts): OrchestratorPhaseResult {
   if (opts.dryRun) return { name: 'install', status: 'skipped', detail: 'dry-run' };
   if (opts.noAutopilotInstall) return { name: 'install', status: 'skipped', detail: '--no-autopilot-install' };
   try {
-    execSync('gbrain autopilot --install --yes', { stdio: 'inherit', timeout: 60_000, env: process.env });
+    execSync(`${migrationCliCommand()} autopilot --install --yes`, { stdio: 'inherit', timeout: 60_000, env: process.env });
     return { name: 'install', status: 'complete' };
   } catch (e) {
     // Install is best-effort — log but don't fail the whole migration. User

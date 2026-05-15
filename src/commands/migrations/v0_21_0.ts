@@ -28,13 +28,14 @@
 import { execSync } from 'child_process';
 import type { Migration, OrchestratorOpts, OrchestratorResult, OrchestratorPhaseResult } from './types.ts';
 import { childGlobalFlags } from '../../core/cli-options.ts';
+import { migrationCliCommand } from './cli-path.ts';
 
 // ── Phase A — Schema ────────────────────────────────────────
 
 function phaseASchema(opts: OrchestratorOpts): OrchestratorPhaseResult {
   if (opts.dryRun) return { name: 'schema', status: 'skipped', detail: 'dry-run' };
   try {
-    execSync('gbrain init --migrate-only' + childGlobalFlags(), {
+    execSync(`${migrationCliCommand()} init --migrate-only${childGlobalFlags()}`, {
       stdio: 'inherit',
       timeout: 600_000,
       env: process.env,
