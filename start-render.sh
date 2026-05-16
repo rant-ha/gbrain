@@ -6,7 +6,12 @@ export PATH="$PWD/node_modules/.bin:$PATH"
 : "${PROXY_API_KEY:?PROXY_API_KEY is required}"
 : "${PROXY_BASE_URL:?PROXY_BASE_URL is required}"
 
-export PROXY_API_KEY PROXY_BASE_URL
+# Match the exact model ids registered in the LiteLLM proxy. Do not guess
+# provider prefixes here — some deployments expose bare ids like
+# `text-embedding-3-small`, others expose provider-qualified ids.
+LITELLM_EMBEDDING_MODEL="${LITELLM_EMBEDDING_MODEL:-text-embedding-3-small}"
+
+export PROXY_API_KEY PROXY_BASE_URL LITELLM_EMBEDDING_MODEL
 
 mkdir -p "$HOME/.gbrain"
 
@@ -27,7 +32,7 @@ if (fs.existsSync(configPath)) {
 }
 
 delete config.openai_api_key;
-config.embedding_model = 'litellm:text-embedding-3-small';
+config.embedding_model = `litellm:${process.env.LITELLM_EMBEDDING_MODEL}`;
 config.embedding_dimensions = 1536;
 config.chat_model = 'litellm:mistralai/mistral-medium-3.5-128b';
 const providerBaseUrls = { ...(config.provider_base_urls ?? {}) };
