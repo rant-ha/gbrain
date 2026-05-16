@@ -516,15 +516,15 @@ export function isAvailable(touchpoint: TouchpointKind): boolean {
     // model only for embeddings. Chat/expansion can legitimately accept an
     // arbitrary provider-specific model id through the proxy, so do not
     // block them on an empty allowlist.
-    const isUserProvided =
-      touchpoint === 'embedding' &&
-      (touchpointConfig as any).user_provided_models === true;
-    if (
-      touchpoint === 'embedding' &&
-      Array.isArray(touchpointConfig.models) &&
-      touchpointConfig.models.length === 0 &&
-      (recipe.id === 'litellm' || isUserProvided)
-    ) return false;
+    if (touchpoint === 'embedding') {
+      const isUserProvided = (touchpointConfig as any).user_provided_models === true;
+      if (Array.isArray(touchpointConfig.models) && touchpointConfig.models.length === 0 && isUserProvided) {
+        return true;
+      }
+      if (Array.isArray(touchpointConfig.models) && touchpointConfig.models.length === 0 && recipe.id === 'litellm') {
+        return true;
+      }
+    }
 
     // For openai-compatible without auth requirements (Ollama local), treat as always-available.
     const required = recipe.auth_env?.required ?? [];

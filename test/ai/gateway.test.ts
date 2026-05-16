@@ -83,6 +83,16 @@ describe('gateway.isAvailable (silent-drop regression surface)', () => {
     expect(isAvailable('embedding')).toBe(true);
   });
 
+  test('embedding AVAILABLE for LiteLLM proxy with a user-provided model id', () => {
+    configureGateway({
+      embedding_model: 'litellm:text-embedding-3-small',
+      embedding_dimensions: 1536,
+      env: { LITELLM_BASE_URL: 'http://localhost:4000' },
+      base_urls: { litellm: 'http://localhost:4000' },
+    });
+    expect(isAvailable('embedding')).toBe(true);
+  });
+
   test('anthropic rejects embedding touchpoint (has no embedding model)', () => {
     configureGateway({
       embedding_model: 'anthropic:claude-haiku-4-5-20251001',

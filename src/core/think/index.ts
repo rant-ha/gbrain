@@ -19,6 +19,7 @@
 
 import type { BrainEngine, SynthesisEvidenceInput } from '../engine.ts';
 import { chat as gatewayChat } from '../ai/gateway.ts';
+import { isAvailable } from '../ai/gateway.ts';
 import { runGather, renderPagesBlock, takesHitToTakeForPrompt } from './gather.ts';
 import { renderTakesBlock } from './sanitize.ts';
 import { buildThinkSystemPrompt, buildThinkUserMessage } from './prompt.ts';
@@ -197,7 +198,10 @@ export async function runThink(
   });
 
   // Render evidence blocks for the prompt
-  const pagesBlock = renderPagesBlock(gather.pages);
+  const pagesBlock = renderPagesBlock([
+    ...(gather.anchorPage ? [gather.anchorPage] : []),
+    ...gather.pages,
+  ]);
   const takesForPrompt = gather.takes.map(takesHitToTakeForPrompt);
   const { rendered: takesBlock, sanitizedCount } = renderTakesBlock(takesForPrompt);
   if (sanitizedCount > 0) {
@@ -227,7 +231,7 @@ export async function runThink(
   if (opts.stubResponse) {
     response = opts.stubResponse;
   } else {
-    if (!opts.client && !process.env.ANTHROPIC_API_KEY && isAnthropicProvider(modelUsed)) {
+    if (!opts.client && !isAvailable('chat') && isAnthropicProvider(modelUsed)) {
       warnings.push('NO_ANTHROPIC_API_KEY');
       // Degrade gracefully: return the gather without synthesis. Better than throwing.
       return {

@@ -39,6 +39,8 @@ export interface ThinkGatherOpts {
 export interface ThinkGatherResult {
   /** Page hits, ranked by RRF-fused score. */
   pages: SearchResult[];
+  /** Anchor page, when available. Prefers the explicitly requested entity page. */
+  anchorPage?: SearchResult;
   /** Take hits, ranked + dedup'd. */
   takes: TakeHit[];
   /** Graph nodes — slugs reachable from anchor within graphDepth. Empty when no anchor. */
@@ -152,8 +154,24 @@ export async function runGather(
         })
     : Promise.resolve([] as string[]);
 
-  const [pages, takesKw, takesVec, graphSlugs] = await Promise.all([
-    pagesPromise, takesKwPromise, takesVecPromise, graphPromise,
+  const anchorPagePromise: Promise<SearchResult | null> = opts.anchor
+    ? engine.getPage(opts.anchor).then(page => {
+        if (!page) return null;
+        return {
+          slug: page.slug,
+          score: 1,
+          compiled_truth: page.compiled_truth,
+          chunk_text: page.compiled_truth,
+          snippet: page.compiled_truth,
+        } as SearchResult;
+      }).catch((e) => {
+        process.stderr.write(`[think.gather] anchor page fetch failed: ${(e as Error).message}\n`);
+        return null;
+      })
+    : Promise.resolve(null);
+
+  const [pages, takesKw, takesVec, graphSlugs, anchorPage] = await Promise.all([
+    pagesPromise, takesKwPromise, takesVecPromise, graphPromise, anchorPagePromise,
   ]);
 
   // Fuse takes streams (keyword + vector). Key by (page_slug, row_num).
@@ -164,6 +182,7 @@ export async function runGather(
 
   return {
     pages: pages.slice(0, gatherLimit),
+    anchorPage: anchorPage ?? undefined,
     takes: fusedTakes,
     graphSlugs,
     diagnostics: {

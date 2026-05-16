@@ -177,6 +177,33 @@ describe('runThink (with stub client)', () => {
     expect(result.warnings).not.toContain('LLM_OUTPUT_NOT_JSON');
   });
 
+  test('anchor page is included in the think prompt gather', async () => {
+    const stubClient: ThinkLLMClient = {
+      create: async () => ({
+        id: 'msg_anchor',
+        type: 'message',
+        role: 'assistant',
+        model: 'stub',
+        stop_reason: 'end_turn',
+        stop_sequence: null,
+        usage: { input_tokens: 10, output_tokens: 10, cache_creation_input_tokens: 0, cache_read_input_tokens: 0, server_tool_use: null, service_tier: null },
+        content: [{
+          type: 'text',
+          text: JSON.stringify({ answer: 'ok', citations: [], gaps: [] }),
+        }],
+      }),
+    };
+
+    const result = await runThink(engine, {
+      question: '用户对电影的核心审美偏好是什么？',
+      anchor: 'concepts/media-taste',
+      client: stubClient,
+    });
+
+    expect(result.pagesGathered).toBeGreaterThan(0);
+    expect(result.graphHits).toBeGreaterThan(0);
+  });
+
   test('handles malformed LLM output gracefully (regex citation fallback)', async () => {
     const stubClient: ThinkLLMClient = {
       create: async () => ({
