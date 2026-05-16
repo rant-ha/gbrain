@@ -56,6 +56,8 @@ export interface EmbedResult {
   pages_processed: number;
   /** True if this run was a dry-run. */
   dryRun: boolean;
+  /** Number of page-level embedding failures encountered during the run. */
+  failed_pages: number;
 }
 
 /**
@@ -74,6 +76,7 @@ export async function runEmbedCore(engine: BrainEngine, opts: EmbedOpts): Promis
     total_chunks: 0,
     pages_processed: 0,
     dryRun: !!opts.dryRun,
+    failed_pages: 0,
   };
 
   if (opts.slugs && opts.slugs.length > 0) {
@@ -81,6 +84,7 @@ export async function runEmbedCore(engine: BrainEngine, opts: EmbedOpts): Promis
       try {
         await embedPage(engine, s, !!opts.dryRun, result, opts.sourceId);
       } catch (e: unknown) {
+        result.failed_pages++;
         console.error(`  Error embedding ${s}: ${e instanceof Error ? e.message : e}`);
       }
     }
@@ -308,6 +312,7 @@ async function embedAll(
       await engine.upsertChunks(page.slug, updated, pageOpts);
       result.embedded += toEmbed.length;
     } catch (e: unknown) {
+      result.failed_pages++;
       console.error(`\n  Error embedding ${page.slug}: ${e instanceof Error ? e.message : e}`);
     }
 
@@ -475,6 +480,7 @@ async function embedAllStale(
           // Budget-fired aborts are expected on the way out; don't spam
           // per-page "Error embedding" lines when we're shutting down.
           if (budgetSignal.aborted) return;
+          result.failed_pages++;
           console.error(`\n  Error embedding ${slug}: ${e instanceof Error ? e.message : e}`);
         }
         totalProcessedPages++;

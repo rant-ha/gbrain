@@ -1033,18 +1033,22 @@ export async function registerBuiltinHandlers(worker: MinionWorker, engine: Brai
     // readable via `gbrain jobs get <id>`). Stderr from the worker daemon
     // only emits coarse job-start / job-done lines; per-page detail lives
     // in the DB. Per Codex review #20.
-    await runEmbedCore(engine, {
+    const result = await runEmbedCore(engine, {
       slug: typeof job.data.slug === 'string' ? job.data.slug : undefined,
       slugs: Array.isArray(job.data.slugs) ? (job.data.slugs as string[]) : undefined,
       all: !!job.data.all,
       stale: job.data.all ? false : (job.data.stale !== false),
+      sourceId: typeof job.data.sourceId === 'string' ? job.data.sourceId : undefined,
       onProgress: (done, total, embedded) => {
         // Fire-and-forget: progress updates are best-effort and must not
         // block the worker loop.
         job.updateProgress({ done, total, embedded, phase: 'embed.pages' }).catch(() => {});
       },
     });
-    return { embedded: true };
+    if (!result.dryRun && result.embedded === 0 && result.failed_pages > 0) {
+      throw new Error(`embed job produced 0 embeddings and ${result.failed_pages} page failures`);
+    }
+    return result;
   });
 
   worker.register('lint', async (job) => {
