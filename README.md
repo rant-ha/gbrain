@@ -130,6 +130,11 @@ open http://localhost:3131/admin
 ngrok http 3131 --url your-brain.ngrok.app
 gbrain serve --http --port 3131 --public-url https://your-brain.ngrok.app
 
+# On Render, start-render.sh already binds 0.0.0.0, enables DCR, reads
+# the public issuer URL from RENDER_EXTERNAL_URL (or GBRAIN_PUBLIC_URL), and
+# forwards `PROXY_BASE_URL` / `PROXY_API_KEY` into the LiteLLM-compatible
+# `litellm:` recipe so your proxy base URL and API key are actually used.
+
 # ChatGPT and other OAuth-aware clients can also connect:
 claude mcp add gbrain -t http https://your-brain.ngrok.app/mcp -H "Authorization: Bearer TOKEN"
 ```
@@ -139,7 +144,11 @@ pick scopes, save the credentials shown once in the reveal modal. Programmatic
 registration via `oauthProvider.registerClientManual(...)` and the
 `gbrain auth register-client` CLI are also available.
 
-- **OAuth 2.1 via the MCP SDK** — client credentials (machine-to-machine: Perplexity, Claude), authorization code + PKCE (browser-based: ChatGPT), refresh token rotation, revocation, protected resource metadata. PKCE-only public clients (`token_endpoint_auth_method: "none"`) register without a secret per RFC 7591 §3.2.1 (v0.34). Optional Dynamic Client Registration behind `--enable-dcr` (DCR redirect_uris must be `https://` or loopback per RFC 6749 §3.1.2.1).
+ChatGPT is the exception: it uses DCR and supplies its own redirect URI during
+registration, so you need `--enable-dcr` and the public issuer URL rather than
+the admin dashboard form.
+
+- **OAuth 2.1 via the MCP SDK** — client credentials (machine-to-machine: Perplexity, Claude), authorization code + PKCE (browser-based: ChatGPT), refresh token rotation, revocation, protected resource metadata. ChatGPT uses DCR (`/register`) rather than manual callback entry, and PKCE-only public clients (`token_endpoint_auth_method: "none"`) register without a secret per RFC 7591 §3.2.1 (v0.34). Optional Dynamic Client Registration behind `--enable-dcr` (DCR redirect_uris must be `https://` or loopback per RFC 6749 §3.1.2.1).
 - **Source-scoped OAuth clients (v0.34)** — `gbrain auth register-client my-agent --source dept-x` ties the client's write authority to one source; read paths only return rows matching that source. `--federated-read S1,S2,S3` adds an orthogonal read-scope axis for shared brains (departments writing to one canon while reading the union). Pre-v0.34 clients are backfilled to `source_id='default'` on upgrade.
 - **Loopback default for `serve --http` (v0.34)** — listens on `127.0.0.1` unless `--bind 0.0.0.0` (or a specific interface IP). Personal-laptop installs no longer publish the brain to the LAN by accident. A stderr WARN fires when `--public-url` is set without `--bind` so the operator sees the binding before the first request.
 - **Scoped operations** — 30 operations tagged `read | write | admin`. `sync_brain` and `file_upload` are `localOnly`, rejected over HTTP.

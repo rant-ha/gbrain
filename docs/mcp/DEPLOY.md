@@ -39,6 +39,13 @@ ChatGPT MCP connector). Pass `--public-url` whenever the server is reachable
 at anything other than `http://localhost:<port>` so the OAuth issuer in
 discovery metadata matches what clients hit (RFC 8414 §3.3).
 
+If you're deploying on Render, the repo's [start-render.sh](../../start-render.sh)
+already wires the right runtime flags: it reads `RENDER_EXTERNAL_URL` (or
+`GBRAIN_PUBLIC_URL`), binds `0.0.0.0`, enables DCR so ChatGPT can register
+its callback URL automatically, and forwards `PROXY_BASE_URL` /
+`PROXY_API_KEY` into the LiteLLM-compatible `litellm:` recipe so your proxy
+base URL and API key are used instead of the native OpenAI path.
+
 Supported clients:
 - **ChatGPT** — requires OAuth 2.1 + PKCE. Works natively with `--http`.
 - **Claude Desktop / Cowork** — OAuth 2.1 or legacy bearer tokens.
@@ -96,7 +103,7 @@ and per-client config export.
 
 ### 2. Register OAuth clients
 
-Register clients from the **`/admin` dashboard**:
+Register confidential clients from the **`/admin` dashboard**:
 
 1. Click **Register client**.
 2. Enter a name (e.g. `perplexity`, `chatgpt`).
@@ -106,8 +113,12 @@ Register clients from the **`/admin` dashboard**:
    clients with PKCE (ChatGPT).
 5. For `authorization_code` clients, paste the redirect URI.
 6. Hit **Register**. The credential-reveal modal shows the `client_id` (and
-   `client_secret` for confidential clients) once. Copy or Download JSON
-   immediately — secrets are hashed on storage and never shown again.
+  `client_secret` for confidential clients) once. Copy or Download JSON
+  immediately — secrets are hashed on storage and never shown again.
+
+For ChatGPT specifically, use DCR instead of the admin dashboard. The admin
+form does not collect redirect URIs, so it cannot register a ChatGPT PKCE
+client by itself.
 
 Or from the CLI — faster for scripting:
 
@@ -148,6 +159,21 @@ await oauthProvider.registerClientManual(
 
 For self-service client registration (Dynamic Client Registration, RFC 7591),
 start the server with `--enable-dcr`. DCR is off by default.
+
+ChatGPT's OAuth advanced settings should point at the public issuer and the
+registration endpoint, not a manually entered callback. Use:
+
+- Registration method: `User-Defined OAuth Client`
+- Registration URL: `https://your-brain.ngrok.app/register`
+- Auth server base: `https://your-brain.ngrok.app/`
+- Resource: `https://your-brain.ngrok.app/`
+- Token endpoint auth method: `none`
+- Default scopes: `read write`
+- Base scopes: leave blank
+- OIDC: disabled
+
+ChatGPT will send its redirect URI during the `/register` call, so there is
+no place to paste a callback URL into GBrain.
 
 ### 3. Expose the server
 

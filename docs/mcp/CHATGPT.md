@@ -12,38 +12,40 @@ HTTP server.
 ### 1. Start the HTTP server
 
 ```bash
-gbrain serve --http --port 3131
+gbrain serve --http --port 3131 --bind 0.0.0.0 --enable-dcr --public-url https://your-brain.ngrok.app
 ```
 
 Save the admin bootstrap token printed on stderr. Open
 `http://localhost:3131/admin` and paste it to access the dashboard.
 
+If you're deploying on Render, the repo's `start-render.sh` already does the
+same thing for you: it reads `RENDER_EXTERNAL_URL` (or `GBRAIN_PUBLIC_URL`),
+binds `0.0.0.0`, and enables DCR so ChatGPT can self-register its callback.
+
 ### 2. Register a ChatGPT client
 
 ChatGPT uses the authorization code flow with PKCE (browser-based OAuth).
-Register from the `/admin` dashboard:
+For ChatGPT, do not try to paste a callback URL into GBrain's admin UI: the
+current `/admin` client form does not collect redirect URIs. Instead, enable
+Dynamic Client Registration and let ChatGPT send its own callback during the
+OAuth handshake.
 
-1. Click **Register client**.
-2. Name: `chatgpt`.
-3. Grant type: `authorization_code`.
-4. Scopes: `read`, `write` (leave `admin` unchecked for ChatGPT).
-5. Redirect URI: ChatGPT's OAuth redirect (copy it from the ChatGPT
-   connector setup screen — something like
-   `https://chat.openai.com/connector_platform_oauth_redirect`).
-6. Hit **Register**. The credential-reveal modal shows the `client_id` once
-   with Copy and Download JSON buttons. There is no client secret for
-   PKCE-based public clients.
+Use the ChatGPT connector's advanced OAuth settings:
 
-Host-repo wrappers can register programmatically:
+1. Registration method: **User-Defined OAuth Client**.
+2. Registration URL: `https://your-brain.ngrok.app/register`.
+3. Auth server base: `https://your-brain.ngrok.app/`.
+4. Resource: `https://your-brain.ngrok.app/`.
+5. Client ID: leave blank for the first connect.
+6. Client Secret: leave blank.
+7. Token endpoint auth method: `none`.
+8. Default scopes: `read write`.
+9. Base scopes: leave blank.
+10. OIDC: disabled.
 
-```ts
-await oauthProvider.registerClientManual(
-  'chatgpt',
-  ['authorization_code'],
-  'read write',
-  ['https://chat.openai.com/connector_platform_oauth_redirect'],
-);
-```
+When you click Connect, ChatGPT will register a public PKCE client and supply
+its redirect URI itself. GBrain stores that redirect URI server-side during the
+`/register` call.
 
 ### 3. Expose the server publicly
 
@@ -54,7 +56,9 @@ ngrok http 3131 --url your-brain.ngrok.app
 
 Your OAuth issuer URL becomes `https://your-brain.ngrok.app`. ChatGPT's
 connector auto-discovers the spec-compliant endpoint at
-`/.well-known/oauth-authorization-server`.
+`/.well-known/oauth-authorization-server`. If the connector says
+`Unregistered redirect_uri`, the server is not running with DCR enabled or the
+public issuer URL does not match the URL ChatGPT is using.
 
 ### 4. Add the connector in ChatGPT
 
@@ -82,10 +86,10 @@ and the admin dashboard.
 ## Troubleshooting
 
 **"Invalid redirect_uri" during the ChatGPT connector OAuth handshake**
-The registered `redirect-uri` must match ChatGPT's exactly. If ChatGPT
-rejects your server, check the admin dashboard's **Agents** table for the
-client, confirm the redirect URI matches what the error page shows, and
-re-register with the correct URI.
+Make sure the server is running with `--enable-dcr` and `--public-url` points
+at the same public host ChatGPT reaches. ChatGPT provides the redirect URI
+itself during registration, so there is no manual callback field to fill in
+on the GBrain side.
 
 **ChatGPT shows an MCP connection error after approval**
 Open `/admin`, watch the SSE feed, and try again. If no request arrives, the
