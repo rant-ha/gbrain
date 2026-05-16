@@ -30,11 +30,18 @@ if (fs.existsSync(configPath)) {
 }
 
 delete config.openai_api_key;
-config.embedding_model = `litellm:${process.env.LITELLM_EMBEDDING_MODEL}`;
+if (process.env.OPENAI_API_KEY) {
+	config.openai_api_key = process.env.OPENAI_API_KEY;
+	config.embedding_model = 'openai:text-embedding-3-small';
+} else {
+	config.embedding_model = `litellm:${process.env.LITELLM_EMBEDDING_MODEL}`;
+}
 config.embedding_dimensions = 1536;
 config.chat_model = 'litellm:mistralai/mistral-medium-3.5-128b';
 const providerBaseUrls = { ...(config.provider_base_urls ?? {}) };
-delete providerBaseUrls.openai;
+if (process.env.OPENAI_BASE_URL) {
+	providerBaseUrls.openai = process.env.OPENAI_BASE_URL;
+}
 providerBaseUrls.litellm = process.env.PROXY_BASE_URL;
 config.provider_base_urls = {
 	...providerBaseUrls,

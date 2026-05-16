@@ -1304,6 +1304,7 @@ function buildGatewayConfig(c: GBrainConfig): AIGatewayConfig {
   // recipe's base_url_default (localhost:8080). Same fix applies to
   // OLLAMA_BASE_URL. Caller-provided cfg.provider_base_urls wins.
   const envBaseUrls: Record<string, string> = {};
+  if (process.env.OPENAI_BASE_URL) envBaseUrls['openai'] = process.env.OPENAI_BASE_URL;
   if (process.env.LLAMA_SERVER_BASE_URL) envBaseUrls['llama-server'] = process.env.LLAMA_SERVER_BASE_URL;
   if (process.env.OLLAMA_BASE_URL) envBaseUrls['ollama'] = process.env.OLLAMA_BASE_URL;
   if (process.env.LMSTUDIO_BASE_URL) envBaseUrls['lmstudio'] = process.env.LMSTUDIO_BASE_URL;
