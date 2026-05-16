@@ -1046,7 +1046,8 @@ export async function registerBuiltinHandlers(worker: MinionWorker, engine: Brai
       },
     });
     if (!result.dryRun && result.embedded === 0 && result.failed_pages > 0) {
-      throw new Error(`embed job produced 0 embeddings and ${result.failed_pages} page failures`);
+      const firstError = result.errors[0] ?? 'unknown embed failure';
+      throw new Error(`embed job produced 0 embeddings and ${result.failed_pages} page failures; first error: ${firstError}`);
     }
     return result;
   });
