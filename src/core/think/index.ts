@@ -1,9 +1,9 @@
 /**
  * v0.28: `gbrain think` — INTENT → GATHER → SYNTHESIZE → (optional) COMMIT.
  *
- * v0.28.0 ships the full pipeline. The Anthropic call is dependency-injected
- * (MessagesClient interface) so tests can stub it without an API key. Live
- * runs require ANTHROPIC_API_KEY in the environment.
+ * v0.28.0 ships the full pipeline. Tests can stub the synthesis call via
+ * ThinkLLMClient. Live runs use the shared AI gateway and therefore follow
+ * the configured model/provider for the resolved think model.
  *
  * --rounds scaffolding: round 1 is the only round actually exercised in
  * v0.28. Round N+1 fed by gaps from round N is the v0.29 follow-up; the
@@ -17,17 +17,22 @@
  * for those flags per Codex P1 #7.
  */
 
-import Anthropic from '@anthropic-ai/sdk';
 import type { BrainEngine, SynthesisEvidenceInput } from '../engine.ts';
+import { chat as gatewayChat } from '../ai/gateway.ts';
 import { runGather, renderPagesBlock, takesHitToTakeForPrompt } from './gather.ts';
 import { renderTakesBlock } from './sanitize.ts';
 import { buildThinkSystemPrompt, buildThinkUserMessage } from './prompt.ts';
 import { resolveCitations, type ParsedCitation } from './cite-render.ts';
-import { resolveModel } from '../model-config.ts';
+import { isAnthropicProvider, resolveModel } from '../model-config.ts';
 
-/** Anthropic Messages client interface — same shape used by subagent.ts so test stubs can be shared. */
+/** Test override for think synthesis. Production uses the shared AI gateway. */
 export interface ThinkLLMClient {
-  create(params: Anthropic.MessageCreateParamsNonStreaming, opts?: { signal?: AbortSignal }): Promise<Anthropic.Message>;
+  create(params: {
+    model: string;
+    max_tokens: number;
+    system: string;
+    messages: Array<{ role: 'user'; content: string }>;
+  }, opts?: { signal?: AbortSignal }): Promise<{ content: Array<{ type: 'text'; text: string }> }>;
 }
 
 export interface RunThinkOpts {
@@ -222,7 +227,7 @@ export async function runThink(
   if (opts.stubResponse) {
     response = opts.stubResponse;
   } else {
-    if (!opts.client && !process.env.ANTHROPIC_API_KEY) {
+    if (!opts.client && !process.env.ANTHROPIC_API_KEY && isAnthropicProvider(modelUsed)) {
       warnings.push('NO_ANTHROPIC_API_KEY');
       // Degrade gracefully: return the gather without synthesis. Better than throwing.
       return {
@@ -244,19 +249,25 @@ export async function runThink(
         },
       };
     }
-    // Anthropic SDK exposes the create method via .messages — match the structural signature.
-    const realClient = new Anthropic();
-    const client: ThinkLLMClient = opts.client ?? {
-      create: (params, opts2) => realClient.messages.create(params, opts2),
-    };
-    const result = await client.create({
-      model: modelUsed,
-      max_tokens: DEFAULT_MAX_OUTPUT_TOKENS,
-      system: systemPrompt,
-      messages: [{ role: 'user', content: userMessage }],
-    });
-    const block = result.content.find(b => b.type === 'text');
-    const text = block && 'text' in block ? block.text : '';
+    let text: string;
+    if (opts.client) {
+      const result = await opts.client.create({
+        model: modelUsed,
+        max_tokens: DEFAULT_MAX_OUTPUT_TOKENS,
+        system: systemPrompt,
+        messages: [{ role: 'user', content: userMessage }],
+      });
+      const block = result.content.find(b => b.type === 'text');
+      text = block && 'text' in block ? block.text : '';
+    } else {
+      const result = await gatewayChat({
+        model: modelUsed,
+        system: systemPrompt,
+        messages: [{ role: 'user', content: userMessage }],
+        maxTokens: DEFAULT_MAX_OUTPUT_TOKENS,
+      });
+      text = result.text;
+    }
     const parsed = tryParseJSON(text);
     if (!parsed || typeof parsed !== 'object') {
       warnings.push('LLM_OUTPUT_NOT_JSON');

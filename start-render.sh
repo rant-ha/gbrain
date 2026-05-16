@@ -55,8 +55,15 @@ if [ -z "$PUBLIC_URL" ]; then
 	exit 1
 fi
 
-bun run src/cli.ts config set models.default "litellm:mistralai/mistral-medium-3.5-128b"
+# Keep the strongest model on reasoning/facts, and keep the high-frequency
+# chat + expansion paths on Mistral.
+bun run src/cli.ts config set models.default "litellm:gpt-5.4-mini"
+bun run src/cli.ts config set models.think "litellm:gpt-5.4-mini"
 bun run src/cli.ts config set models.chat "litellm:mistralai/mistral-medium-3.5-128b"
+bun run src/cli.ts config set models.expansion "litellm:mistralai/mistral-medium-3.5-128b"
+bun run src/cli.ts config set facts.extraction_model "litellm:gpt-5.4-mini"
+bun run src/cli.ts config set models.tier.reasoning "litellm:gpt-5.4-mini"
+bun run src/cli.ts config set models.auto_think "litellm:gpt-5.4-mini"
 
 echo "Applying database migrations..."
 bun run src/cli.ts apply-migrations --yes --non-interactive
