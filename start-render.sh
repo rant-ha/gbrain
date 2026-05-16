@@ -29,6 +29,7 @@ if (fs.existsSync(configPath)) {
 delete config.openai_api_key;
 config.embedding_model = 'litellm:text-embedding-3-small';
 config.embedding_dimensions = 1536;
+config.chat_model = 'litellm:mistralai/mistral-medium-3.5-128b';
 const providerBaseUrls = { ...(config.provider_base_urls ?? {}) };
 delete providerBaseUrls.openai;
 providerBaseUrls.litellm = process.env.PROXY_BASE_URL;
@@ -55,6 +56,7 @@ if [ -z "$PUBLIC_URL" ]; then
 fi
 
 bun run src/cli.ts config set models.default "litellm:mistralai/mistral-medium-3.5-128b"
+bun run src/cli.ts config set models.chat "litellm:mistralai/mistral-medium-3.5-128b"
 
 echo "Applying database migrations..."
 bun run src/cli.ts apply-migrations --yes --non-interactive

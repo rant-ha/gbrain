@@ -97,6 +97,38 @@ describe('facts extract — silent-no-op regression (v0.31.6 bug class)', () => 
     expect(facts).toEqual([]);
   });
 
+  test('extractFactsFromTurn still calls the chat transport when chat_model is unavailable', async () => {
+    configureGateway({
+      chat_model: 'anthropic:claude-sonnet-4-6',
+      env: {},
+    });
+    expect(isAvailable('chat')).toBe(false);
+
+    let chatCalled = false;
+    __setChatTransportForTests(async () => {
+      chatCalled = true;
+      return {
+        text: JSON.stringify({
+          facts: [{ fact: 'Garry founded Initialized', kind: 'fact', confidence: 1.0, notability: 'high' }],
+        }),
+        blocks: [],
+        stopReason: 'end',
+        usage: { input_tokens: 0, output_tokens: 0, cache_read_tokens: 0, cache_creation_tokens: 0 },
+        model: 'test:stub',
+        providerId: 'test',
+      };
+    });
+
+    const facts = await extractFactsFromTurn({
+      turnText: 'Garry founded Initialized in 2010 with Alexis.',
+      source: 'test:no-op-regression-stub',
+    });
+
+    expect(chatCalled).toBe(true);
+    expect(facts).toHaveLength(1);
+    expect(facts[0].fact).toBe('Garry founded Initialized');
+  });
+
   test('extractFactsFromTurn USES the chat transport when available — does NOT silently return []', async () => {
     // The smoking-gun test: when chat IS available, extract MUST actually call
     // the chat transport. If it silently returns [] without calling chat, the

@@ -37,6 +37,31 @@ import {
   CODE_REFS_DESCRIPTION,
 } from './operations-descriptions.ts';
 
+function coerceStringList(value: unknown): string[] {
+  if (Array.isArray(value)) {
+    return value.map(item => String(item).trim()).filter(Boolean);
+  }
+  if (typeof value === 'string') {
+    const trimmed = value.trim();
+    if (!trimmed) return [];
+    try {
+      const parsed = JSON.parse(trimmed);
+      if (Array.isArray(parsed)) {
+        return parsed.map(item => String(item).trim()).filter(Boolean);
+      }
+      if (typeof parsed === 'string') {
+        return [parsed.trim()].filter(Boolean);
+      }
+    } catch {
+      // Fall back to CSV-style parsing for compatibility with ChatGPT inputs.
+    }
+    return trimmed.includes(',')
+      ? trimmed.split(',').map(part => part.trim()).filter(Boolean)
+      : [trimmed];
+  }
+  return [];
+}
+
 // --- Types ---
 
 /**
@@ -1885,17 +1910,23 @@ const log_ingest: Operation = {
   params: {
     source_type: { type: 'string', required: true },
     source_ref: { type: 'string', required: true },
-    pages_updated: { type: 'array', required: true, items: { type: 'string' } },
+    pages_updated: {
+      type: 'array',
+      required: true,
+      items: { type: 'string' },
+      description: 'Array of page slugs. HTTP MCP also accepts a JSON array string or comma-separated list.',
+    },
     summary: { type: 'string', required: true },
   },
   mutating: true,
   scope: 'write',
   handler: async (ctx, p) => {
     if (ctx.dryRun) return { dry_run: true, action: 'log_ingest' };
+    const pagesUpdated = coerceStringList(p.pages_updated);
     await ctx.engine.logIngest({
       source_type: p.source_type as string,
       source_ref: p.source_ref as string,
-      pages_updated: p.pages_updated as string[],
+      pages_updated: pagesUpdated,
       summary: p.summary as string,
     });
     return { status: 'ok' };
@@ -2696,7 +2727,7 @@ const extract_facts: Operation = {
   params: {
     turn_text: { type: 'string', required: true, description: 'The user message or page body to extract facts from. Sanitized via INJECTION_PATTERNS before the LLM call.' },
     session_id: { type: 'string', description: 'Opaque session id (e.g. topic-id from MCP _meta.session_id, or CLI --session). Stored on each fact for the recall --session filter. Not an auth surface.' },
-    entity_hints: { type: 'array', description: 'Existing canonical entity slugs the agent has already resolved. Helps the extractor pick the right slug.' },
+    entity_hints: { type: 'array', description: 'Existing canonical entity slugs the agent has already resolved. HTTP MCP also accepts a JSON array string or comma-separated list.' },
     is_dream_generated: { type: 'boolean', description: 'When true, extraction is skipped (anti-loop). Caller flips this on for pages with dream_generated:true frontmatter.' },
     visibility: { type: 'string', description: 'Default visibility for extracted facts. private (default) | world.' },
   },
@@ -2725,12 +2756,13 @@ const extract_facts: Operation = {
 
     const sourceId = ctx.sourceId ?? 'default';
     const visibility: 'private' | 'world' = p.visibility === 'world' ? 'world' : 'private';
+    const entityHints = coerceStringList(p.entity_hints);
 
     const r = await runFactsPipeline(p.turn_text as string, {
       engine: ctx.engine,
       sourceId,
       sessionId: typeof p.session_id === 'string' ? p.session_id : null,
-      entityHints: Array.isArray(p.entity_hints) ? (p.entity_hints as string[]) : undefined,
+      entityHints: entityHints.length > 0 ? entityHints : undefined,
       source: 'mcp:extract_facts',
       visibility,
       mode: 'inline',  // declarative; runFactsPipeline always inline

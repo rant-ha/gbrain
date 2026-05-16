@@ -135,7 +135,7 @@ export async function startHttpTransport(opts: HttpTransportOptions) {
   const limiters = opts.limiters || buildDefaultLimiters();
   const bodyCap = envInt('GBRAIN_HTTP_MAX_BODY_BYTES', DEFAULT_BODY_CAP);
   const corsAllowlist = parseCorsAllowlist();
-  const tools = buildToolDefs(operations);
+  const tools = buildToolDefs(operations, { arrayParamsAsString: true });
 
   function corsHeaders(origin: string | null, extra: Record<string, string> = {}): Record<string, string> {
     const headers: Record<string, string> = { ...extra };

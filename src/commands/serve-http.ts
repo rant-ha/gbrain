@@ -72,7 +72,6 @@ export async function probeHealth(
       }),
     ]);
     return {
-      ok: true,
       status: 200,
       body: { status: 'ok', version, engine: engineName, ...stats },
     };
@@ -841,7 +840,7 @@ export async function runServeHttp(engine: BrainEngine, options: ServeHttpOption
             type: 'object' as const,
             properties: Object.fromEntries(
               Object.entries(op.params).map(([k, v]) => [k, {
-                type: v.type,
+                type: v.type === 'array' ? 'string' : v.type,
                 description: v.description,
                 ...(v.enum ? { enum: v.enum } : {}),
                 ...(v.default !== undefined ? { default: v.default } : {}),

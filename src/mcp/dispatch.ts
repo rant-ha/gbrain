@@ -180,7 +180,7 @@ export function validateParams(op: Operation, params: Record<string, unknown>): 
       if (expected === 'number' && typeof val !== 'number') return `Parameter "${key}" must be a number`;
       if (expected === 'boolean' && typeof val !== 'boolean') return `Parameter "${key}" must be a boolean`;
       if (expected === 'object' && (typeof val !== 'object' || Array.isArray(val))) return `Parameter "${key}" must be an object`;
-      if (expected === 'array' && !Array.isArray(val)) return `Parameter "${key}" must be an array`;
+      if (expected === 'array' && !Array.isArray(val) && typeof val !== 'string') return `Parameter "${key}" must be an array or string-encoded list`;
     }
   }
   return null;

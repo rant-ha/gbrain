@@ -42,6 +42,15 @@ describe('buildToolDefs', () => {
     expect(JSON.stringify(extracted)).toBe(JSON.stringify(inline));
   });
 
+  test('HTTP compatibility mode serializes array params as strings', () => {
+    const defs = buildToolDefs(operations, { arrayParamsAsString: true });
+    const logIngest = defs.find(def => def.name === 'log_ingest');
+    const extractFacts = defs.find(def => def.name === 'extract_facts');
+
+    expect(logIngest?.inputSchema.properties.pages_updated).toMatchObject({ type: 'string' });
+    expect(extractFacts?.inputSchema.properties.entity_hints).toMatchObject({ type: 'string' });
+  });
+
   test('preserves operation count', () => {
     expect(buildToolDefs(operations).length).toBe(operations.length);
   });

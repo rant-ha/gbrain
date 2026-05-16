@@ -10,7 +10,12 @@ export interface McpToolDef {
   };
 }
 
-export function buildToolDefs(ops: Operation[]): McpToolDef[] {
+export interface BuildToolDefsOptions {
+  /** When true, array params are serialized as string inputs for HTTP clients. */
+  arrayParamsAsString?: boolean;
+}
+
+export function buildToolDefs(ops: Operation[], options: BuildToolDefsOptions = {}): McpToolDef[] {
   return ops.map(op => ({
     name: op.name,
     description: op.description,
@@ -18,10 +23,10 @@ export function buildToolDefs(ops: Operation[]): McpToolDef[] {
       type: 'object' as const,
       properties: Object.fromEntries(
         Object.entries(op.params).map(([k, v]) => [k, {
-          type: v.type === 'array' ? 'array' : v.type,
+          type: v.type === 'array' && options.arrayParamsAsString ? 'string' : v.type === 'array' ? 'array' : v.type,
           ...(v.description ? { description: v.description } : {}),
           ...(v.enum ? { enum: v.enum } : {}),
-          ...(v.items ? { items: { type: v.items.type } } : {}),
+          ...(v.items && !(v.type === 'array' && options.arrayParamsAsString) ? { items: { type: v.items.type } } : {}),
         }]),
       ),
       required: Object.entries(op.params)

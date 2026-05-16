@@ -21,7 +21,7 @@
  * gateway-down errors are absorbed into NULL-embedding rows.
  */
 
-import { chat, embedOne, isAvailable } from '../ai/gateway.ts';
+import { chat, embedOne } from '../ai/gateway.ts';
 import type { ChatResult } from '../ai/gateway.ts';
 import { INJECTION_PATTERNS } from '../think/sanitize.ts';
 import { resolveModel } from '../model-config.ts';
@@ -137,12 +137,6 @@ export async function extractFactsFromTurn(input: ExtractInput): Promise<Extract
   for (const p of INJECTION_PATTERNS) cleaned = cleaned.replace(p.rx, p.replacement);
   cleaned = cleaned.trim();
   if (!cleaned) return [];
-
-  if (!isAvailable('chat')) {
-    // No chat gateway → no extraction. Caller still inserts facts via direct
-    // `gbrain take add` paths.
-    return [];
-  }
 
   const cap = Math.max(1, Math.min(input.maxFactsPerTurn ?? 10, 25));
   const defaultModel = await getFactsExtractionModel(input.engine);

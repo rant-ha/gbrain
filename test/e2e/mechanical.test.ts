@@ -528,6 +528,20 @@ describeE2E('E2E: Ingest Log & Raw Data', () => {
     expect(entry.source_type).toBe('e2e-test');
   }, 30_000);
 
+  test('log_ingest accepts string-encoded pages_updated for HTTP compatibility', async () => {
+    await callOp('log_ingest', {
+      source_type: 'e2e-test',
+      source_ref: 'test-run-1-string',
+      pages_updated: JSON.stringify(['people/sarah-chen', 'companies/novamind']),
+      summary: 'E2E test ingest (string-encoded pages_updated)',
+    });
+
+    const log = await callOp('get_ingest_log', { limit: 5 }) as any[];
+    const entry = log.find((e: any) => e.source_ref === 'test-run-1-string');
+    expect(entry).toBeDefined();
+    expect(entry.source_type).toBe('e2e-test');
+  }, 30_000);
+
   test('put_raw_data + get_raw_data round trip', async () => {
     const testData = { education: 'Stanford CS 2020', title: 'CEO' };
     await callOp('put_raw_data', {

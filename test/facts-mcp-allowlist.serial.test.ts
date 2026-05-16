@@ -103,4 +103,16 @@ describe('extract_facts dispatch (no API key)', () => {
     expect(payload.superseded).toBe(0);
     expect(Array.isArray(payload.fact_ids)).toBe(true);
   });
+
+  test('accepts string-encoded entity_hints for HTTP compatibility', async () => {
+    const r = await dispatchToolCall(engine, 'extract_facts', {
+      turn_text: 'I am flying to Tokyo Tuesday.',
+      entity_hints: JSON.stringify(['people/sarah-chen', 'companies/novamind']),
+    }, { remote: true, sourceId: 'default' });
+    expect(r.isError).toBeFalsy();
+    const payload = JSON.parse(r.content[0].text);
+    expect(payload.inserted).toBe(0);
+    expect(payload.duplicate).toBe(0);
+    expect(payload.superseded).toBe(0);
+  });
 });
