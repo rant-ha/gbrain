@@ -40,6 +40,17 @@ export const litellmProxy: Recipe = {
       // mismatched-dim responses pre-storage).
       supports_multimodal: true,
     },
+    chat: {
+      models: [],
+      supports_tools: true,
+      supports_subagent_loop: true,
+      supports_prompt_cache: false,
+      price_last_verified: '2026-05-16',
+    },
+    expansion: {
+      models: [],
+      price_last_verified: '2026-05-16',
+    },
   },
   setup_hint: 'Run LiteLLM (https://docs.litellm.ai) in front of any provider; set LITELLM_BASE_URL + pass --embedding-model litellm:<model> and --embedding-dimensions <N>.',
 };

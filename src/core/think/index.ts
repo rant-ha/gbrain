@@ -52,7 +52,7 @@ export interface RunThinkOpts {
   until?: string;
   /** When set, MCP-bound calls forward this to the gather phase (server-side filter). */
   takesHoldersAllowList?: string[];
-  /** Inject an LLM client (for tests). Defaults to a fresh Anthropic SDK client. */
+  /** Inject an LLM client (for tests). Production uses the shared AI gateway. */
   client?: ThinkLLMClient;
   /** Inject a question-embedding function. When omitted, vector takes search is skipped. */
   embedQuestion?: (q: string) => Promise<Float32Array | null>;

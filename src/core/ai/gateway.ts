@@ -513,14 +513,14 @@ export function isAvailable(touchpoint: TouchpointKind): boolean {
     const touchpointConfig = recipe.touchpoints[touchpoint as 'embedding' | 'expansion' | 'chat'];
     if (!touchpointConfig) return false;
     // Openai-compat recipes with empty models list require a user-provided
-    // model. Either the recipe explicitly opts in via
-    // EmbeddingTouchpoint.user_provided_models (D8=A), or the legacy
-    // `recipe.id === 'litellm'` heuristic (back-compat for pre-v0.32 builds
-    // where the field hadn't been declared yet).
+    // model only for embeddings. Chat/expansion can legitimately accept an
+    // arbitrary provider-specific model id through the proxy, so do not
+    // block them on an empty allowlist.
     const isUserProvided =
       touchpoint === 'embedding' &&
       (touchpointConfig as any).user_provided_models === true;
     if (
+      touchpoint === 'embedding' &&
       Array.isArray(touchpointConfig.models) &&
       touchpointConfig.models.length === 0 &&
       (recipe.id === 'litellm' || isUserProvided)

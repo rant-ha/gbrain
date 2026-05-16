@@ -180,6 +180,15 @@ describe('chat touchpoint — gateway config plumbing', () => {
     configureGateway({ chat_model: 'voyage:voyage-3', env: { VOYAGE_API_KEY: 'fake' } });
     expect(isAvailable('chat')).toBe(false);
   });
+
+  test('isAvailable("chat") accepts LiteLLM proxy chat models', () => {
+    configureGateway({
+      chat_model: 'litellm:gpt-5.4-mini',
+      env: { LITELLM_BASE_URL: 'http://localhost:4000' },
+      base_urls: { litellm: 'http://localhost:4000' },
+    });
+    expect(isAvailable('chat')).toBe(true);
+  });
 });
 
 describe('chat touchpoint — config alias resolution', () => {
