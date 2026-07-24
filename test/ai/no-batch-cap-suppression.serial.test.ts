@@ -28,8 +28,8 @@ describe('v0.32 #779: no_batch_cap suppresses the missing-max_batch_tokens warni
     resetGateway();
   });
 
-  test('Ollama, LiteLLM, llama-server all declare no_batch_cap: true', () => {
-    for (const id of ['ollama', 'litellm', 'llama-server']) {
+  test('Ollama, LiteLLM declare no_batch_cap: true', () => {
+    for (const id of ['ollama', 'litellm']) {
       const r = getRecipe(id);
       expect(r, `${id} not registered`).toBeDefined();
       expect(
@@ -37,6 +37,16 @@ describe('v0.32 #779: no_batch_cap suppresses the missing-max_batch_tokens warni
         `${id} should declare no_batch_cap: true`,
       ).toBe(true);
     }
+  });
+
+  test('llama-server declares a hard item-count cap (max_batch_items: 32)', () => {
+    // llama.cpp enforces a request-COUNT cap equal to its launch --batch-size
+    // (default 32); declaring max_batch_items both bounds batches AND suppresses
+    // the missing-max_batch_tokens warning. Replaces the prior no_batch_cap flag.
+    const r = getRecipe('llama-server');
+    expect(r, 'llama-server not registered').toBeDefined();
+    expect(r!.touchpoints.embedding?.max_batch_items).toBe(32);
+    expect(r!.touchpoints.embedding?.no_batch_cap).toBeUndefined();
   });
 
   test('configureGateway does NOT warn for ollama/litellm/llama-server', () => {
@@ -52,14 +62,27 @@ describe('v0.32 #779: no_batch_cap suppresses the missing-max_batch_tokens warni
     }
   });
 
-  test('configureGateway STILL warns for google (real provider, no cap declared)', () => {
+  test('configureGateway warns for google only when google embedding is configured', () => {
     warnSpy.mockClear();
     resetGateway();
     configureGateway({ env: {} });
-    const messages = warnSpy.mock.calls.map(c => String(c[0] ?? ''));
+    let messages = warnSpy.mock.calls.map(c => String(c[0] ?? ''));
     expect(
       messages.some(m => m.includes('"google"') && m.includes('without max_batch_tokens')),
-      'google should warn (it has fixed-cap models)',
+      'google should not warn while OpenAI default is configured',
+    ).toBe(false);
+
+    warnSpy.mockClear();
+    resetGateway();
+    configureGateway({
+      embedding_model: 'google:gemini-embedding-001',
+      embedding_dimensions: 768,
+      env: { GOOGLE_GENERATIVE_AI_API_KEY: 'fake' },
+    });
+    messages = warnSpy.mock.calls.map(c => String(c[0] ?? ''));
+    expect(
+      messages.some(m => m.includes('"google"') && m.includes('without max_batch_tokens')),
+      'google should warn when configured because it has fixed-cap models',
     ).toBe(true);
   });
 

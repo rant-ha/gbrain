@@ -26,22 +26,30 @@
  *   - Daily token budget cap (cooldown bounds spend at v1 scale).
  */
 
-import Anthropic from '@anthropic-ai/sdk';
+import type Anthropic from '@anthropic-ai/sdk';
 import { readFileSync, existsSync, writeFileSync, mkdirSync } from 'node:fs';
-import { join, dirname } from 'node:path';
+import { randomUUID } from 'node:crypto';
+import { chat as gatewayChat, validateModelId, type ChatResult } from '../ai/gateway.ts';
+import { AIConfigError } from '../ai/errors.ts';
+import { normalizeModelId } from '../model-id.ts';
+import { hasAnthropicKey } from '../ai/anthropic-key.ts';
+import { join, dirname, isAbsolute, resolve } from 'node:path';
 import type { BrainEngine } from '../engine.ts';
 import type { PhaseResult, PhaseError } from '../cycle.ts';
 import { MinionQueue } from '../minions/queue.ts';
 import { waitForCompletion, TimeoutError } from '../minions/wait-for-completion.ts';
-import type { MinionJobInput, SubagentHandlerData } from '../minions/types.ts';
+import { makeSubagentHandler } from '../minions/handlers/subagent.ts';
+import type { MinionJobInput, MinionJobContext, MinionHandler, SubagentHandlerData } from '../minions/types.ts';
 import { discoverTranscripts, type DiscoveredTranscript } from './transcript-discovery.ts';
-import { serializeMarkdown } from '../markdown.ts';
+import { serializeMarkdown, serializePageToMarkdown } from '../markdown.ts';
 import type { Page, PageType } from '../types.ts';
 import { validateSourceId } from '../utils.ts';
+import { safeSplitIndex } from '../text-safe.ts';
+import { PAGE_SLUG_SEG } from '../cjk.ts';
 
-// Slug regex from validatePageSlug — kept in sync.
+// Slug grammar from validatePageSlug — shared via PAGE_SLUG_SEG (#738).
 // Used for the orchestrator-written summary index slug.
-const SUMMARY_SLUG_RE = /^[a-z0-9][a-z0-9\-]*(\/[a-z0-9][a-z0-9\-]*)*$/;
+const SUMMARY_SLUG_RE = new RegExp(`^${PAGE_SLUG_SEG}(\\/${PAGE_SLUG_SEG})*$`);
 
 // ── Model context budget (D1, D5, D7, D9) ─────────────────────────────
 
@@ -70,6 +78,8 @@ const MIN_PROMPT_TOKENS = 100_000;
 const DEFAULT_MAX_CHUNKS = 24;
 /** Conservative default budget when model is unknown (200K × HEADROOM_RATIO). */
 const UNKNOWN_MODEL_BUDGET_TOKENS = 180_000;
+const DEFAULT_SUBAGENT_TIMEOUT_MS = 30 * 60 * 1000;
+const DEFAULT_SUBAGENT_WAIT_TIMEOUT_MS = 35 * 60 * 1000;
 
 /**
  * Compute per-chunk character budget for the resolved model + config override.
@@ -179,7 +189,12 @@ function findBoundary(text: string, maxChars: number, searchStart: number): numb
   const nlIdx = window.lastIndexOf('\n');
   if (nlIdx >= 0) return searchStart + nlIdx;
   // No boundary fits; hard-split at maxChars (deterministic).
-  return maxChars;
+  // v0.42.0.0: route through safeSplitIndex so a hard-split that lands
+  // between a UTF-16 surrogate pair (emoji / non-BMP CJK / mathematical
+  // alphanumerics) doesn't orphan the high surrogate — that would change
+  // chunk byte-content vs the source and break the D9 stable-chunk-identity
+  // invariant on the next retry.
+  return safeSplitIndex(text, maxChars);
 }
 
 /**
@@ -232,6 +247,136 @@ export interface SynthesizePhaseOpts {
    * the synthesize loop. Caller must opt in explicitly.
    */
   bypassDreamGuard?: boolean;
+  /**
+   * #1586: the cycle's resolved brain source (cycleSourceId from cycle.ts —
+   * explicit --source wins, else derived from the checkout dir). Threaded to
+   * every subagent child as `source_id` so put_page writes land in this
+   * source, and stamped onto collected refs so reverse-writes read the
+   * correct (source_id, slug) row. Unset → legacy 'default'.
+   */
+  sourceId?: string;
+  /**
+   * issue #2860 — `gbrain dream --phase synthesize --once`. Bypasses the
+   * `dream.synthesize.enabled` gate for THIS call only (does NOT bypass
+   * the `session_corpus_dir` not-configured check — there's nothing to
+   * run without a corpus). Never reads or writes config.
+   */
+  once?: boolean;
+}
+
+const INLINE_PGLITE_LOCK_MS = 30_000;
+
+/**
+ * PGLite cannot be served by a separate Minions worker process: the embedded
+ * data-dir holds an exclusive file lock, so subagent children enqueued by the
+ * synth parent would sit in 'waiting' until waitForCompletion times out.
+ * Drive the same claim → run → complete/fail loop a worker would perform,
+ * inline, against this phase's private child queue.
+ *
+ * `yieldDuringPhase` is ticked on a 60s interval while a child runs so the
+ * 5-min cycle lock TTL keeps refreshing during long (up to 30-min) children.
+ */
+async function runPgliteSubagentsInline(
+  engine: BrainEngine,
+  queue: MinionQueue,
+  queueName: string,
+  yieldDuringPhase?: () => Promise<void>,
+  handler: MinionHandler = makeSubagentHandler({ engine }),
+): Promise<void> {
+  if (engine.kind !== 'pglite') return;
+
+  while (true) {
+    // Housekeeping a worker would normally perform, so child rows can reach
+    // terminal states (delayed retries promoted, timeouts dead-lettered)
+    // before the synth parent enters waitForCompletion polling.
+    await queue.promoteDelayed();
+    await queue.handleStalled();
+    await queue.handleTimeouts();
+    await queue.handleWallClockTimeouts(INLINE_PGLITE_LOCK_MS);
+
+    const lockToken = randomUUID();
+    const job = await queue.claim(lockToken, INLINE_PGLITE_LOCK_MS, queueName, ['subagent']);
+    if (!job) return;
+
+    const abort = new AbortController();
+    const shutdown = new AbortController();
+    const context: MinionJobContext = {
+      id: job.id,
+      name: job.name,
+      data: job.data,
+      attempts_made: job.attempts_made,
+      signal: abort.signal,
+      deadlineAtMs: job.timeout_at != null ? job.timeout_at.getTime() : null,
+      shutdownSignal: shutdown.signal,
+      updateProgress: async (progress: unknown) => {
+        await queue.updateProgress(job.id, lockToken, progress);
+      },
+      updateTokens: async (tokens) => {
+        await queue.updateTokens(job.id, lockToken, tokens);
+      },
+      log: async (message) => {
+        const value = typeof message === 'string' ? message : JSON.stringify(message);
+        await engine.executeRaw(
+          `UPDATE minion_jobs SET stacktrace = COALESCE(stacktrace, '[]'::jsonb) || to_jsonb($1::text),
+            updated_at = now()
+           WHERE id = $2 AND status = 'active' AND lock_token = $3`,
+          [value, job.id, lockToken],
+        );
+      },
+      isActive: async () => {
+        const rows = await engine.executeRaw<{ id: number }>(
+          `SELECT id FROM minion_jobs WHERE id = $1 AND status = 'active' AND lock_token = $2`,
+          [job.id, lockToken],
+        );
+        return rows.length > 0;
+      },
+      readInbox: async () => queue.readInbox(job.id, lockToken),
+    };
+
+    // Per-job deadline enforcement (worker.ts parity). While the drain loop
+    // awaits the handler, the handleTimeouts sweep above can't run, so nothing
+    // else can stop a child that blows past timeout_ms — the handler only
+    // stops when ctx.signal fires. Derive the delay from the claim-time
+    // timeout_at stamp so timer, DB sweeper, and deadlineAtMs agree.
+    let timeoutTimer: ReturnType<typeof setTimeout> | null = null;
+    if (job.timeout_ms != null) {
+      const delayMs = job.timeout_at != null
+        ? Math.max(0, job.timeout_at.getTime() - Date.now())
+        : job.timeout_ms;
+      timeoutTimer = setTimeout(() => {
+        if (!abort.signal.aborted) abort.abort(new Error('timeout'));
+      }, delayMs);
+    }
+
+    // Cycle-lock keepalive while the child runs (best-effort, never throws).
+    const keepalive = yieldDuringPhase
+      ? setInterval(() => { yieldDuringPhase().catch(() => { /* best-effort */ }); }, 60_000)
+      : null;
+    try {
+      const result = await handler(context);
+      await queue.completeJob(
+        job.id,
+        lockToken,
+        result != null ? (typeof result === 'object' ? result as Record<string, unknown> : { value: result }) : undefined,
+      );
+    } catch (e) {
+      // Timeout is terminal (handleTimeouts parity: stall → retry,
+      // timeout → dead), never a delayed retry.
+      const timedOut = abort.signal.aborted;
+      const errorText = timedOut ? 'timeout exceeded' : (e instanceof Error ? e.message : String(e));
+      const attemptsExhausted = job.attempts_made + 1 >= job.max_attempts;
+      await queue.failJob(
+        job.id,
+        lockToken,
+        errorText,
+        timedOut || attemptsExhausted ? 'dead' : 'delayed',
+        0,
+      );
+    } finally {
+      if (timeoutTimer) clearTimeout(timeoutTimer);
+      if (keepalive) clearInterval(keepalive);
+    }
+  }
 }
 
 export async function runPhaseSynthesize(
@@ -239,6 +384,23 @@ export async function runPhaseSynthesize(
   opts: SynthesizePhaseOpts,
 ): Promise<PhaseResult> {
   const start = Date.now();
+  // Normalize brainDir to an absolute path BEFORE any reverse-write. Without
+  // this, a relative or empty brainDir flows down to writeReversePages →
+  // `join(brainDir, '${slug}.md')` → relative path → resolves against cwd at
+  // writeFileSync time, spilling synthesize output into whatever directory
+  // the cycle ran from (e.g., `companies/novamind.md` at the repo root).
+  // Surfaced by the warm-narwhal wave when E2E test cleanup found orphan
+  // synthesize pages at repo root from a `runCycle({brainDir: '.'})` call
+  // chain. Throw on empty (silent cwd-resolution is worse than a loud
+  // failure); resolve if relative (`.` / `./brain` / `../sibling` all valid
+  // inputs but must canonicalize before the write).
+  if (!opts.brainDir || opts.brainDir.trim() === '') {
+    return failed(makeError('InternalError', 'BRAINDIR_EMPTY',
+      'opts.brainDir is empty; refusing to run synthesize. Pass an absolute path.'));
+  }
+  if (!isAbsolute(opts.brainDir)) {
+    opts.brainDir = resolve(opts.brainDir);
+  }
   try {
     const config = await loadSynthConfig(engine);
 
@@ -248,8 +410,14 @@ export async function runPhaseSynthesize(
         'dream.synthesize.session_corpus_dir is unset');
     }
     if (!opts.inputFile && !config.enabled) {
-      return skipped('not_configured',
-        'dream.synthesize.enabled is explicitly false');
+      if (!opts.once) {
+        return skipped('not_configured',
+          'dream.synthesize.enabled is explicitly false');
+      }
+      process.stderr.write(
+        '[dream] --once: dream.synthesize.enabled is false but ' +
+        '--phase synthesize --once forces this run (config untouched)\n',
+      );
     }
 
     // Cooldown check (skipped for explicit --input / --date / --from / --to runs).
@@ -296,7 +464,12 @@ export async function runPhaseSynthesize(
     // Significance verdicts (cached in dream_verdicts; Haiku on miss).
     const worthProcessing: DiscoveredTranscript[] = [];
     const verdicts: Array<{ filePath: string; worth: boolean; reasons: string[]; cached: boolean }> = [];
-    const haiku = makeHaikuClient(); // null if no API key
+    // Provider-aware judge client routes through gateway.chat, so any
+    // configured provider works (Anthropic, DeepSeek, OpenRouter, Voyage,
+    // Ollama, llama-server, etc.). Returns null when the resolved verdict
+    // model has no reachable provider (legacy "no API key" branch preserved
+    // as the cheap pre-flight check).
+    const judge = makeJudgeClient(config.verdictModel);
     for (const t of transcripts) {
       const cached = await engine.getDreamVerdict(t.filePath, t.contentHash);
       if (cached) {
@@ -304,15 +477,38 @@ export async function runPhaseSynthesize(
         if (cached.worth_processing) worthProcessing.push(t);
         continue;
       }
-      if (!haiku) {
-        // No API key — can't judge. Skip with explicit reason; don't crash phase.
-        verdicts.push({ filePath: t.filePath, worth: false, reasons: ['no ANTHROPIC_API_KEY for significance judge'], cached: false });
+      if (!judge) {
+        // No configured provider for the verdict model — can't judge.
+        // Skip with explicit reason; don't crash phase.
+        verdicts.push({
+          filePath: t.filePath,
+          worth: false,
+          reasons: [`no configured provider for verdict model: ${config.verdictModel}`],
+          cached: false,
+        });
         continue;
       }
-      const verdict = await judgeSignificance(haiku, t, config.verdictModel);
-      await engine.putDreamVerdict(t.filePath, t.contentHash, verdict);
-      verdicts.push({ filePath: t.filePath, worth: verdict.worth_processing, reasons: verdict.reasons, cached: false });
-      if (verdict.worth_processing) worthProcessing.push(t);
+      try {
+        const verdict = await judgeSignificance(judge, t, config.verdictModel);
+        await engine.putDreamVerdict(t.filePath, t.contentHash, verdict);
+        verdicts.push({ filePath: t.filePath, worth: verdict.worth_processing, reasons: verdict.reasons, cached: false });
+        if (verdict.worth_processing) worthProcessing.push(t);
+      } catch (e) {
+        // AIConfigError at chat time = provider auth/config went bad mid-run
+        // (revoked key, recipe misconfig surfacing at first real call). Skip
+        // this transcript with the gateway error message so the user sees the
+        // shape of the problem in `gbrain dream --phase synthesize --dry-run`.
+        if (e instanceof AIConfigError) {
+          verdicts.push({
+            filePath: t.filePath,
+            worth: false,
+            reasons: [`gateway error: ${e.message}`],
+            cached: false,
+          });
+          continue;
+        }
+        throw e;
+      }
     }
 
     // Dry-run stops here: significance filter ran (Haiku verdicts cached),
@@ -342,16 +538,24 @@ export async function runPhaseSynthesize(
 
     // Fan-out: submit one subagent per worth-processing transcript (or one
     // per chunk for transcripts that exceed the model's per-prompt budget).
-    const allowedSlugPrefixes = await loadAllowedSlugPrefixes();
+    const allowedSlugPrefixes = await loadAllowedSlugPrefixes(config.outputRoot);
     if (allowedSlugPrefixes.length === 0) {
       return failed(makeError('InternalError', 'NO_ALLOWLIST',
         'skills/_brain-filing-rules.json missing dream_synthesize_paths.globs'));
     }
 
     const queue = new MinionQueue(engine);
+    // PGLite children drain inline (no separate worker can open the embedded
+    // data-dir), so give them a private per-run queue: the inline drain must
+    // never claim unrelated 'default'-queue jobs a Postgres worker owns.
+    const childQueueName = engine.kind === 'pglite'
+      ? `dream-inline-${Date.now()}-${randomUUID().slice(0, 8)}`
+      : 'default';
     const childIds: number[] = [];
     /** Map child job_id → chunk metadata for D6 orchestrator-side slug rewrite. */
     const chunkInfo = new Map<number, { idx: number; hash6: string }>();
+    /** #1978: map child job_id → source transcript path so written pages get a raw_source stamp. */
+    const jobRawSource = new Map<number, string>();
     /** Skip reasons for the cycle report (D5 cap hits, D8 legacy-key skips). */
     const skipReports: Array<{ filePath: string; reason: string }> = [];
 
@@ -393,12 +597,25 @@ export async function runPhaseSynthesize(
       }
 
       const isChunked = chunks.length > 1;
+      // queue.add subagent validator (classifyCapabilities → resolveRecipe)
+      // requires `provider:model`. resolveModel can return a bare id when
+      // TIER_DEFAULTS / DEFAULT_ALIASES carry a bare value; ensure the
+      // anthropic: prefix is present for known claude-* ids before passing
+      // to the queue. Non-anthropic providers must already declare a colon.
+      const subagentModel = config.model.includes(':')
+        ? config.model
+        : config.model.toLowerCase().startsWith('claude-')
+          ? `anthropic:${config.model}`
+          : config.model;
       for (let i = 0; i < chunks.length; i++) {
         const childData: SubagentHandlerData = {
-          prompt: buildSynthesisPrompt(t, chunks[i], i, chunks.length, priorContradictionsBlock),
-          model: config.model,
+          prompt: buildSynthesisPrompt(t, chunks[i], i, chunks.length, priorContradictionsBlock, config.outputRoot),
+          model: subagentModel,
           max_turns: 30,
           allowed_slug_prefixes: allowedSlugPrefixes,
+          // #1586: scope every child tool call to the cycle's resolved source
+          // so put_page writes land there instead of the hardcoded 'default'.
+          ...(opts.sourceId ? { source_id: opts.sourceId } : {}),
         };
         // Idempotency key parity:
         //   - single-chunk → legacy `dream:synth:<filePath>:<hash16>` (byte-
@@ -413,7 +630,8 @@ export async function runPhaseSynthesize(
           max_stalled: 3,
           on_child_fail: 'continue',
           idempotency_key,
-          timeout_ms: 30 * 60 * 1000, // 30 min per chunk
+          timeout_ms: config.subagentTimeoutMs,
+          queue: childQueueName,
         };
         const child = await queue.add(
           'subagent',
@@ -422,11 +640,18 @@ export async function runPhaseSynthesize(
           { allowProtectedSubmit: true },
         );
         childIds.push(child.id);
+        jobRawSource.set(child.id, t.filePath);
         if (isChunked) {
           chunkInfo.set(child.id, { idx: i, hash6 });
         }
       }
     }
+
+    // PGLite cannot run a separate Minions worker because the embedded DB
+    // holds an exclusive file lock. Drain this phase's private child queue
+    // inline so the parent observes terminal child states instead of polling
+    // waiters until subagentWaitTimeoutMs expires. No-op on Postgres.
+    await runPgliteSubagentsInline(engine, queue, childQueueName, opts.yieldDuringPhase);
 
     // Wait for every child to reach a terminal state. Tick yieldDuringPhase
     // every 5 min so the cycle lock TTL refreshes.
@@ -434,7 +659,7 @@ export async function runPhaseSynthesize(
     for (const jobId of childIds) {
       try {
         const job = await waitForCompletion(queue, jobId, {
-          timeoutMs: 35 * 60 * 1000,
+          timeoutMs: config.subagentWaitTimeoutMs,
           pollMs: 5 * 1000,
         });
         childOutcomes.push({ jobId, status: job.status });
@@ -457,20 +682,29 @@ export async function runPhaseSynthesize(
     // bare-hash slugs to `<hash6>-c<idx>` so chunked siblings can't collide
     // even if Sonnet drops the chunk suffix.
     // v0.32.8: refs carry source_id so reverseWriteRefs picks the correct
-    // (source, slug) row (currently always 'default' from subagent put_page).
-    const writtenRefs = await collectChildPutPageSlugs(engine, childIds, chunkInfo);
+    // (source, slug) row. #1586: refs are stamped with the cycle's resolved
+    // source (children write there via SubagentHandlerData.source_id).
+    const cycleSourceId = opts.sourceId ?? 'default';
+    const writtenRefs = await collectChildPutPageSlugs(engine, childIds, chunkInfo, cycleSourceId, jobRawSource);
+
+    const summaryDate = opts.date ?? today();
+
+    // #2569: persist the dream-output identity marker into the DB frontmatter
+    // of every child-written page BEFORE reverse-rendering, so generated pages
+    // are queryable (`frontmatter->>'dream_generated'`) and a later put_page
+    // write-through (which re-renders from the DB row) can't erase the stamp.
+    await stampDreamProvenance(engine, writtenRefs, summaryDate);
 
     // Dual-write: reverse-render each DB row → markdown file.
-    const reverseWriteCount = await reverseWriteRefs(engine, opts.brainDir, writtenRefs);
+    const reverseWriteCount = await reverseWriteRefs(engine, opts.brainDir, writtenRefs, cycleSourceId);
 
     // Summary index page (deterministic; orchestrator-written via direct
     // engine.putPage so no allow-list path needed).
-    const summaryDate = opts.date ?? today();
     const summarySlug = `dream-cycle-summaries/${summaryDate}`;
     // Back-compat: writeSummaryPage takes string[] for display; map refs back to slugs.
     const writtenSlugs = writtenRefs.map(r => r.slug);
     if (SUMMARY_SLUG_RE.test(summarySlug)) {
-      await writeSummaryPage(engine, opts.brainDir, summarySlug, summaryDate, writtenSlugs, childOutcomes);
+      await writeSummaryPage(engine, opts.brainDir, summarySlug, summaryDate, writtenSlugs, childOutcomes, cycleSourceId);
     }
 
     // Write completion timestamp ON SUCCESS only.
@@ -528,6 +762,27 @@ interface SynthConfig {
    * `dream.synthesize.max_chunks_per_transcript`.
    */
   maxChunksPerTranscript: number;
+  /**
+   * #2415: top-level namespace for synthesized output (reflections, originals,
+   * patterns). Config key `dream.synthesize.output_root`; default 'wiki' —
+   * zero behavior change unless set. No trailing slash. Must satisfy the slug
+   * grammar; invalid values fall back to 'wiki' with a stderr warning.
+   */
+  outputRoot: string;
+  subagentTimeoutMs: number;
+  subagentWaitTimeoutMs: number;
+}
+
+/** #2415: shared output-root resolution (synthesize + patterns phases). */
+export async function loadOutputRoot(engine: BrainEngine): Promise<string> {
+  const raw = await engine.getConfig('dream.synthesize.output_root');
+  if (!raw) return 'wiki';
+  const trimmed = raw.trim().replace(/^\/+|\/+$/g, '');
+  if (SUMMARY_SLUG_RE.test(trimmed)) return trimmed;
+  process.stderr.write(
+    `[dream] dream.synthesize.output_root "${raw}" is not a valid slug prefix; falling back to "wiki".\n`,
+  );
+  return 'wiki';
 }
 
 async function loadSynthConfig(engine: BrainEngine): Promise<SynthConfig> {
@@ -556,6 +811,16 @@ async function loadSynthConfig(engine: BrainEngine): Promise<SynthConfig> {
   const cooldownHoursStr = await engine.getConfig('dream.synthesize.cooldown_hours');
   const maxPromptTokensStr = await engine.getConfig('dream.synthesize.max_prompt_tokens');
   const maxChunksStr = await engine.getConfig('dream.synthesize.max_chunks_per_transcript');
+  const subagentTimeoutMs = await getNumberConfig(
+    engine,
+    'dream.synthesize.subagent_timeout_ms',
+    DEFAULT_SUBAGENT_TIMEOUT_MS,
+  );
+  const subagentWaitTimeoutMs = await getNumberConfig(
+    engine,
+    'dream.synthesize.subagent_wait_timeout_ms',
+    DEFAULT_SUBAGENT_WAIT_TIMEOUT_MS,
+  );
 
   let excludePatterns: string[] = ['medical', 'therapy'];
   if (excludeStr) {
@@ -593,7 +858,21 @@ async function loadSynthConfig(engine: BrainEngine): Promise<SynthConfig> {
     cooldownHours: cooldownHoursStr ? Math.max(0, parseInt(cooldownHoursStr, 10) || 12) : 12,
     maxPromptTokens,
     maxChunksPerTranscript,
+    outputRoot: await loadOutputRoot(engine),
+    subagentTimeoutMs,
+    subagentWaitTimeoutMs,
   };
+}
+
+async function getNumberConfig(
+  engine: BrainEngine,
+  key: string,
+  fallback: number,
+): Promise<number> {
+  const raw = await engine.getConfig(key);
+  if (raw === undefined || raw === null) return fallback;
+  const value = Number(raw);
+  return Number.isNaN(value) ? fallback : value;
 }
 
 async function checkCooldown(
@@ -612,7 +891,13 @@ async function checkCooldown(
 
 // ── Allow-list source of truth ───────────────────────────────────────
 
-async function loadAllowedSlugPrefixes(): Promise<string[]> {
+/**
+ * #2415: `outputRoot` remaps the canonical `wiki/`-rooted globs to the
+ * configured namespace (e.g. `notes/personal/reflections/*`). Default 'wiki'
+ * returns the globs verbatim. Shared by the patterns phase (imported there —
+ * the two phases must enforce the same allow-list).
+ */
+export async function loadAllowedSlugPrefixes(outputRoot = 'wiki'): Promise<string[]> {
   // Search a few known locations relative to the binary / repo. The first
   // hit wins; if none found, return [].
   const candidates = [
@@ -626,23 +911,116 @@ async function loadAllowedSlugPrefixes(): Promise<string[]> {
       const parsed = JSON.parse(raw) as { dream_synthesize_paths?: { globs?: unknown } };
       const globs = parsed?.dream_synthesize_paths?.globs;
       if (Array.isArray(globs) && globs.every(g => typeof g === 'string')) {
-        return globs as string[];
+        if (outputRoot === 'wiki') return globs as string[];
+        return (globs as string[]).map(g =>
+          g.startsWith('wiki/') ? `${outputRoot}/${g.slice('wiki/'.length)}` : g,
+        );
       }
     } catch { /* try next */ }
   }
   return [];
 }
 
-// ── Significance judge (Haiku) ───────────────────────────────────────
+// ── Significance judge (gateway-routed; provider-agnostic) ──────────────
+//
+// The JudgeClient interface is unchanged for test-seam stability — existing
+// tests that pass a mock client to judgeSignificance keep working byte-
+// identically. Only the construction path moved from `new Anthropic()` to
+// `gateway.chat()` so any provider with a registered recipe (Anthropic,
+// DeepSeek, OpenRouter, Voyage, Ollama, llama-server, etc.) is reachable
+// via `gbrain config set models.dream.synthesize_verdict <provider>:<model>`.
+//
+// This mirrors v0.35.5.0's `tryBuildGatewayClient` in src/core/think/index.ts
+// (which closed #952 for runThink). Same pattern, same trade-offs:
+// construction-time provider/key probe returns null on a clear miss (cheap
+// pre-flight), and the verdict loop wraps the actual chat call in try/catch
+// for AIConfigError surfacing mid-run.
 
 export interface JudgeClient {
   create: (params: Anthropic.MessageCreateParamsNonStreaming) => Promise<Anthropic.Message>;
 }
 
-function makeHaikuClient(): JudgeClient | null {
-  if (!process.env.ANTHROPIC_API_KEY) return null;
-  const client = new Anthropic();
-  return { create: client.messages.create.bind(client.messages) };
+/**
+ * Build a gateway-routed JudgeClient for the resolved verdict model.
+ * Returns null when no chat provider is reachable for `verdictModel`:
+ *   - Unknown provider id (resolveRecipe throws AIConfigError).
+ *   - Anthropic provider with no key (env or config) — preserves the legacy
+ *     "no ANTHROPIC_API_KEY" cheap-skip semantics.
+ * On null, the verdict loop short-circuits each transcript with an explicit
+ * "no configured provider" reason and continues the phase.
+ *
+ * For non-Anthropic providers (deepseek, openrouter, voyage, ollama,
+ * llama-server, ...), we delegate auth probing to the gateway's own
+ * recipe `auth_env.required` machinery — AIConfigError at gateway.chat()
+ * time is caught by the verdict loop and surfaced per-transcript.
+ */
+export function makeJudgeClient(verdictModel: string): JudgeClient | null {
+  // Normalize: ensure provider:model shape (and slash→colon — #1698). resolveModel
+  // returns bare anthropic ids (e.g. `claude-haiku-4-5`); gateway.chat needs `anthropic:...`.
+  const modelStr = normalizeModelId(verdictModel);
+
+  // #1698 (C1): id-validity via the shared `validateModelId` core (resolveRecipe +
+  // assertTouchpoint) — catches unknown provider AND typo'd native model. We do NOT
+  // use the full `probeChatModel` here: its `isAvailable` layer would reject
+  // non-Anthropic-no-key providers and an unconfigured gateway, breaking the
+  // deliberate per-transcript-degrade contract (and test A9). validateModelId reads
+  // the recipe registry, not gateway _config, so it works pre-configureGateway().
+  const v = validateModelId(modelStr);
+  if (!v.ok) return null;
+
+  // Anthropic key probe (legacy behavior preserved verbatim). Other providers' key
+  // checks happen lazily at chat call time and surface as AIConfigError, which the
+  // verdict loop catches per-transcript.
+  if (v.parsed.providerId === 'anthropic' && !hasAnthropicKey()) return null;
+
+  return {
+    create: async (params): Promise<Anthropic.Message> => {
+      // Map Anthropic.MessageCreateParamsNonStreaming → gateway.ChatOpts.
+      // `judgeSignificance` always sends string content + string system,
+      // and the adapter only TEXT-flattens the array-of-blocks shape —
+      // `tool_use`, `tool_result`, image, and other non-text blocks become
+      // empty strings. If a future caller wires tool-use or image content
+      // through this client, extend the mapping instead of relying on the
+      // current silent drop. Same pattern as think/index.ts:607-615.
+      const messages = params.messages.map(m => ({
+        role: m.role,
+        content: typeof m.content === 'string'
+          ? m.content
+          : (Array.isArray(m.content)
+              ? m.content.map(b => ('text' in b ? b.text : '')).join('')
+              : ''),
+      }));
+      const system = typeof params.system === 'string'
+        ? params.system
+        : (Array.isArray(params.system)
+            ? params.system.map(b => ('text' in b ? b.text : '')).join('')
+            : undefined);
+
+      const result: ChatResult = await gatewayChat({
+        model: modelStr,
+        system,
+        messages,
+        maxTokens: params.max_tokens,
+      });
+
+      // Map gateway.ChatResult → Anthropic.Message shape. judgeSignificance
+      // reads `.content[0].type === 'text'` and `.content[0].text`; other
+      // fields are best-effort for downstream telemetry parity.
+      return {
+        id: '',
+        type: 'message',
+        role: 'assistant',
+        model: modelStr,
+        content: [{ type: 'text', text: result.text }],
+        stop_reason: 'end_turn',
+        stop_sequence: null,
+        usage: {
+          input_tokens: result.usage.input_tokens,
+          output_tokens: result.usage.output_tokens,
+        },
+      } as unknown as Anthropic.Message;
+    },
+  };
 }
 
 interface VerdictResult {
@@ -658,9 +1036,26 @@ export async function judgeSignificance(
   // Truncate the transcript at 8K chars for cost control. Haiku's verdict
   // doesn't need the full body; the opening + closing sections are usually
   // representative of significance.
-  const trimmed = t.content.length > 8000
-    ? t.content.slice(0, 4000) + '\n[...truncated...]\n' + t.content.slice(-4000)
-    : t.content;
+  //
+  // v0.41.13 surrogate-safety (supersedes PRs #1559+#1561's safeSliceEnd
+  // helper; see text-safe.ts:18-21 module docstring for why that helper
+  // re-introduces the case-3 bug the canonical safeSplitIndex was written
+  // to fix). Routes head + tail slicing through safeSplitIndex so an emoji
+  // at offset 4000 (or length-4000) never produces a lone surrogate that
+  // Anthropic's JSON parser rejects ("no low surrogate in string", caught
+  // 2026-05-24 on telegram).
+  //
+  // Contract: this branch only runs when content.length > 8000, so
+  // length - 4000 > 4000 > 0 — safeSplitIndex never sees an out-of-range
+  // maxChars here. (Codex C-10 documented contract.)
+  let trimmed: string;
+  if (t.content.length > 8000) {
+    const headEnd = safeSplitIndex(t.content, 4000);
+    const tailStart = safeSplitIndex(t.content, t.content.length - 4000);
+    trimmed = t.content.slice(0, headEnd) + '\n[...truncated...]\n' + t.content.slice(tailStart);
+  } else {
+    trimmed = t.content;
+  }
 
   const sys = `You judge whether a conversation transcript is worth synthesizing into a personal knowledge brain.
 
@@ -767,6 +1162,7 @@ function buildSynthesisPrompt(
   chunkIdx: number,
   chunkTotal: number,
   priorContradictionsBlock = '',
+  outputRoot = 'wiki',
 ): string {
   const dateHint = t.inferredDate ?? today();
   const baseSlugSegment = sanitizeForSlug(t.basename) || `session-${dateHint}`;
@@ -792,13 +1188,14 @@ OUTPUT POLICY (ALL of these are required)
 2. Cross-reference compulsively: every new page MUST contain at least one wikilink (e.g., \`[ref](people/jane-doe)\` or \`[[people/jane-doe]]\`) to existing brain content. Use the search tool to find existing pages first.
 3. Do NOT write to any path outside the allow-list shown in the put_page schema.
 4. Slug discipline: lowercase alphanumeric and hyphens only, slash-separated segments. NO underscores, NO file extensions.
+5. Self-contained opening: begin every new page's body with a 2-3 sentence summary that a reader unfamiliar with this transcript could understand on its own, before any quotes or detail. Do not assume the reader has the source conversation for context.
 
 TASKS
 A. Reflections (self-knowledge, pattern recognition, emotional processing):
-   slug: \`wiki/personal/reflections/${dateHint}-<topic-slug>-${hashSuffix}\`
+   slug: \`${outputRoot}/personal/reflections/${dateHint}-<topic-slug>-${hashSuffix}\`
 
 B. Originals (new ideas, frames, theses, mental models):
-   slug: \`wiki/originals/ideas/${dateHint}-<idea-slug>-${hashSuffix}\`
+   slug: \`${outputRoot}/originals/ideas/${dateHint}-<idea-slug>-${hashSuffix}\`
 
 C. People mentions: search first; if a page exists, do not put_page over it (the orchestrator handles people enrichment via timeline entries — your job is the reflection/original synthesis, NOT modifying existing person pages).
 
@@ -839,7 +1236,9 @@ async function collectChildPutPageSlugs(
   engine: BrainEngine,
   childIds: number[],
   chunkInfo: Map<number, { idx: number; hash6: string }>,
-): Promise<Array<{ slug: string; source_id: string }>> {
+  sourceId = 'default',
+  jobRawSource?: Map<number, string>,
+): Promise<Array<{ slug: string; source_id: string; raw_source?: string }>> {
   if (childIds.length === 0) return [];
   // Raw fetch — NO SELECT DISTINCT. Preserves per-child slug duplicates so
   // the orchestrator sees what each child wrote. COALESCE handles both
@@ -848,10 +1247,10 @@ async function collectChildPutPageSlugs(
   //
   // v0.32.8: returns Array<{slug, source_id}> instead of string[]. Subagent
   // put_page tool schema doesn't expose source_id (subagents are scoped to
-  // a single source); default to 'default' for the current dream-cycle
-  // product behavior. Threading the source_id through reverseWriteRefs
-  // guarantees getPage targets the correct (source, slug) row instead of
-  // the first DB match.
+  // a single source). #1586: the orchestrator scopes each child to the
+  // cycle's resolved source via SubagentHandlerData.source_id, and stamps
+  // the SAME source here so reverseWriteRefs / provenance reads target the
+  // correct (source_id, slug) row. Unset → legacy 'default'.
   const rows = await engine.executeRaw<{ job_id: number; slug: string }>(
     `SELECT job_id,
             COALESCE(input->>'slug', (input #>> '{}')::jsonb->>'slug') AS slug
@@ -861,13 +1260,21 @@ async function collectChildPutPageSlugs(
         AND status = 'complete'`,
     [childIds],
   );
-  const rewritten = new Set<string>();
+  // #1978: slug → source transcript path (first writer wins) so the
+  // provenance stamp can record WHERE the synthesized content came from.
+  const rewritten = new Map<string, string | undefined>();
   for (const r of rows) {
     if (typeof r.slug !== 'string' || r.slug.length === 0) continue;
     const ci = chunkInfo.get(r.job_id);
-    rewritten.add(ci ? rewriteChunkedSlug(r.slug, ci.hash6, ci.idx) : r.slug);
+    const slug = ci ? rewriteChunkedSlug(r.slug, ci.hash6, ci.idx) : r.slug;
+    if (!rewritten.has(slug) || rewritten.get(slug) === undefined) {
+      rewritten.set(slug, jobRawSource?.get(r.job_id));
+    }
   }
-  return Array.from(rewritten).sort().map(slug => ({ slug, source_id: 'default' }));
+  return Array.from(rewritten.keys()).sort().map(slug => {
+    const raw_source = rewritten.get(slug);
+    return { slug, source_id: sourceId, ...(raw_source ? { raw_source } : {}) };
+  });
 }
 
 /**
@@ -896,12 +1303,59 @@ async function hasLegacySingleChunkCompletion(
   return rows.length > 0;
 }
 
+// ── Dream-provenance DB stamp (#2569) ────────────────────────────────
+
+/**
+ * Persist the dream-output identity marker (`dream_generated: true` +
+ * `dream_cycle_date`) into the `pages.frontmatter` JSONB row for every page
+ * a synthesize child wrote. Render-time `frontmatterOverrides` alone only
+ * reach the markdown FILE — the DB row stayed unstamped, so DB consumers
+ * couldn't enumerate generated pages and a later put_page write-through
+ * (which re-renders from the DB row) silently erased the marker.
+ *
+ * Plain UPDATE through executeRawJsonb (raw object bound to $3::jsonb —
+ * never JSON.stringify into a ::jsonb cast; engine-parity safe, no new
+ * engine method). Best-effort per row: a stamp failure never kills the
+ * phase (the render-time override still covers the file).
+ */
+async function stampDreamProvenance(
+  engine: BrainEngine,
+  refs: Array<{ slug: string; source_id: string; raw_source?: string }>,
+  cycleDate: string,
+): Promise<void> {
+  if (refs.length === 0) return;
+  const { executeRawJsonb } = await import('../sql-query.ts');
+  for (const { slug, source_id, raw_source } of refs) {
+    try {
+      await executeRawJsonb(
+        engine,
+        `UPDATE pages
+            SET frontmatter = COALESCE(frontmatter, '{}'::jsonb) || $3::jsonb
+          WHERE slug = $1 AND source_id = $2`,
+        [slug, source_id],
+        // #1978 raw-source persistence: record the transcript path the
+        // synthesis was derived from, so `gbrain doctor` (raw_provenance
+        // check) can verify every generated page carries a raw trace.
+        [{
+          dream_generated: true,
+          dream_cycle_date: cycleDate,
+          ...(raw_source ? { raw_source } : {}),
+        }],
+      );
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      process.stderr.write(`[dream] provenance stamp ${slug}@${source_id} failed: ${msg}\n`);
+    }
+  }
+}
+
 // ── Reverse-write DB rows → markdown files ───────────────────────────
 
 async function reverseWriteRefs(
   engine: BrainEngine,
   brainDir: string,
   refs: Array<{ slug: string; source_id: string }>,
+  nativeSourceId = 'default',
 ): Promise<number> {
   let count = 0;
   for (const { slug, source_id } of refs) {
@@ -912,10 +1366,11 @@ async function reverseWriteRefs(
     const tags = await engine.getTags(slug, { sourceId: source_id });
     try {
       const md = renderPageToMarkdown(page, tags);
-      // v0.32.8 F6: non-default sources land at brainDir/.sources/<id>/<slug>.md
-      // so same-slug-different-source pages don't collide. Default-source
-      // pages stay at brainDir/<slug>.md so single-source brains see no change.
-      const filePath = source_id === 'default'
+      // v0.32.8 F6: foreign-source pages land at brainDir/.sources/<id>/<slug>.md
+      // so same-slug-different-source pages don't collide. Pages belonging to
+      // the cycle's own source (#1586: brainDir IS that source's checkout —
+      // legacy 'default' when unscoped) stay at brainDir/<slug>.md.
+      const filePath = source_id === nativeSourceId
         ? join(brainDir, `${slug}.md`)
         : join(brainDir, '.sources', source_id, `${slug}.md`);
       mkdirSync(dirname(filePath), { recursive: true });
@@ -939,21 +1394,18 @@ async function reverseWriteRefs(
  * `serializeMarkdown` does not embed the page slug in the body.
  */
 export function renderPageToMarkdown(page: Page, tags: string[]): string {
-  const frontmatter: Record<string, unknown> = {
-    ...((page.frontmatter ?? {}) as Record<string, unknown>),
-    dream_generated: true,
-    dream_cycle_date: today(),
-  };
-  return serializeMarkdown(
-    frontmatter,
-    page.compiled_truth ?? '',
-    page.timeline ?? '',
-    {
-      type: (page.type as PageType) ?? 'note',
-      title: page.title ?? '',
-      tags,
+  // v0.38 DRY: the dream-output identity stamp (dream_generated +
+  // dream_cycle_date) is the ONLY thing that differs from the v0.38
+  // put_page write-through renderer. Both call the shared
+  // serializePageToMarkdown helper in markdown.ts; this wrapper passes
+  // the dream-specific overrides. Future markdown-shape changes happen
+  // in one place.
+  return serializePageToMarkdown(page, tags, {
+    frontmatterOverrides: {
+      dream_generated: true,
+      dream_cycle_date: today(),
     },
-  );
+  });
 }
 
 // ── Summary index page ───────────────────────────────────────────────
@@ -965,6 +1417,7 @@ async function writeSummaryPage(
   summaryDate: string,
   writtenSlugs: string[],
   childOutcomes: Array<{ jobId: number; status: string }>,
+  sourceId = 'default',
 ): Promise<void> {
   const completed = childOutcomes.filter(c => c.status === 'completed').length;
   const failed = childOutcomes.length - completed;
@@ -989,10 +1442,18 @@ async function writeSummaryPage(
   // parseMarkdown below round-trips it into the DB-stored frontmatter, so the
   // marker survives any later reverse-render of the summary page.
   const fullMarkdown = serializeMarkdown(
-    { dream_generated: true, dream_cycle_date: summaryDate } as Record<string, unknown>,
+    {
+      dream_generated: true,
+      dream_cycle_date: summaryDate,
+      // #1978: deterministic index page — no source document of its own;
+      // raw traces live on the listed pages. Explicit exemption keeps the
+      // doctor raw_provenance check quiet.
+      raw_trace_exempt: true,
+      raw_trace_exempt_reason: 'deterministic dream-cycle index; raw traces live on listed pages',
+    } as Record<string, unknown>,
     body,
     '',
-    { type: 'note' as PageType, title: `Dream cycle ${summaryDate}`, tags: ['dream-cycle'] },
+    { type: 'note' as string, title: `Dream cycle ${summaryDate}`, tags: ['dream-cycle'] },
   );
 
   // Direct engine.putPage — orchestrator write, no subagent context, no
@@ -1002,13 +1463,15 @@ async function writeSummaryPage(
   // unnecessarily; we go straight to the engine.
   const { parseMarkdown } = await import('../markdown.ts');
   const parsed = parseMarkdown(fullMarkdown);
+  // #1586: summary lands in the cycle's resolved source too — otherwise the
+  // children live in the named source while the index drifts to 'default'.
   await engine.putPage(summarySlug, {
     type: parsed.type,
     title: parsed.title,
     compiled_truth: parsed.compiled_truth,
     timeline: parsed.timeline,
     frontmatter: parsed.frontmatter,
-  });
+  }, { sourceId });
 
   // Also write to disk (orchestrator dual-write).
   try {
@@ -1073,4 +1536,8 @@ function makeError(cls: string, code: string, message: string, hint?: string): P
 // double-encoded jsonb regression). Not part of the runtime contract.
 export const __testing = {
   collectChildPutPageSlugs,
+  buildSynthesisPrompt,
+  stampDreamProvenance,
+  reverseWriteRefs,
+  runPgliteSubagentsInline,
 };

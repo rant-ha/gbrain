@@ -3,6 +3,12 @@ set -euo pipefail
 
 export PATH="$PWD/node_modules/.bin:$PATH"
 
+# bun install does not self-link this package's `bin` entry, so bare `gbrain`
+# (spawned by migration orchestrators and upgrade paths) would not resolve on
+# a source checkout. Create the shim ourselves; src/cli.ts has a bun shebang.
+mkdir -p node_modules/.bin
+ln -sf "$PWD/src/cli.ts" node_modules/.bin/gbrain
+
 : "${PROXY_API_KEY:?PROXY_API_KEY is required}"
 : "${PROXY_BASE_URL:?PROXY_BASE_URL is required}"
 
