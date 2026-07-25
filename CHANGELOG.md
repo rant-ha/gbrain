@@ -2,6 +2,12 @@
 
 All notable changes to GBrain will be documented in this file.
 
+## [0.42.65.3] - 2026-07-25
+
+**`think` output-token budget raised: 64K for non-Anthropic models, 32K for Anthropic.**
+
+The synthesis call's `max_tokens` was 4000 for every non-Claude-5 model. Thinking-style models (Gemini flash thinking tiers, GPT reasoning tiers behind a proxy) spend output budget on internal reasoning before emitting the answer, so the JSON synthesis could come back truncated (`LLM_OUTPUT_NOT_JSON`). Non-Anthropic models now get 64000; Anthropic models get 32000 (the Messages API constrains large `max_tokens` on non-streaming requests — 32000 matches the gateway subagent loop's production value). Providers bill actual tokens, not the cap. Note: a model whose hard output limit is below the cap rejects the request with a clear 400 naming `max_tokens` — point `models.think` at a model with a large output window, or ask for a per-model override if you need one. The gateway-wide default for chat/expansion/subagent calls is unchanged (some openai-compat providers cap at 8K/16K and would 400).
+
 ## [0.42.65.2] - 2026-07-25
 
 **Render start script: model config keys are now env-overridable instead of hardcoded.**

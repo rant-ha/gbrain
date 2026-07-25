@@ -151,18 +151,21 @@ export interface ThinkResult {
   };
 }
 
-const DEFAULT_MAX_OUTPUT_TOKENS = 4000;
+const DEFAULT_MAX_OUTPUT_TOKENS = 64000;
 
-// Thinking-by-default Claude 5 models (`anthropic:claude-*-5`) spend a large
-// share of the output budget on internal reasoning before emitting any answer,
-// so the 4000 default leaves `think` with empty or truncated text. Give those
-// models headroom; providers bill actual tokens, not the cap. Everything else
-// keeps 4000.
-const THINKING_DEFAULT_MAX_OUTPUT_TOKENS = 16000;
-const THINKING_BY_DEFAULT_MODEL_RE = /^anthropic[:/]claude-[a-z0-9]+-5(?:[.-]|$)/i;
+// Anthropic models get a LOWER cap than the 64K default: the Messages API
+// constrains large max_tokens on non-streaming requests, and 32000 is the
+// value the gateway's subagent loop already runs in production. Everything
+// else gets 64K — thinking-by-default models (Gemini flash thinking, GPT
+// reasoning tiers via LiteLLM) burn output budget on internal reasoning, and
+// the old 4000 cap truncated the synthesis JSON (LLM_OUTPUT_NOT_JSON).
+// Providers bill actual tokens, not the cap; a model whose hard output limit
+// is below the cap rejects with a clear 400 naming max_tokens.
+const ANTHROPIC_MAX_OUTPUT_TOKENS = 32000;
+const ANTHROPIC_MODEL_RE = /^anthropic[:/]/i;
 export function maxOutputTokensFor(modelStr: string): number {
-  return THINKING_BY_DEFAULT_MODEL_RE.test(modelStr)
-    ? THINKING_DEFAULT_MAX_OUTPUT_TOKENS
+  return ANTHROPIC_MODEL_RE.test(modelStr)
+    ? ANTHROPIC_MAX_OUTPUT_TOKENS
     : DEFAULT_MAX_OUTPUT_TOKENS;
 }
 
