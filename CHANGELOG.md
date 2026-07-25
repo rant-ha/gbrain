@@ -2,6 +2,22 @@
 
 All notable changes to GBrain will be documented in this file.
 
+## [0.42.65.2] - 2026-07-25
+
+**Render start script: model config keys are now env-overridable instead of hardcoded.**
+
+`start-render.sh` re-applied a fixed set of `models.*` values on every boot, silently overwriting any model changes made in the database between restarts — and because the write happened at boot, a database-side change could never survive a redeploy. Each `config set` line now reads a `GBRAIN_MODELS_*` env var first (`GBRAIN_MODELS_DEFAULT`, `GBRAIN_MODELS_THINK`, `GBRAIN_MODELS_CHAT`, `GBRAIN_MODELS_EXPANSION`, `GBRAIN_MODELS_AUTO_THINK`, `GBRAIN_MODELS_TIER_REASONING`, `GBRAIN_FACTS_EXTRACTION_MODEL`) and falls back to the previous literal when unset. `models.think`/`models.auto_think`/`facts.extraction_model` chain to `GBRAIN_MODELS_DEFAULT` so one env var can move the whole reasoning lane. The writes still run before `serve` starts, so the gateway's startup allowlist-exemption sweep (v0.42.65.1) sees the final values.
+
+## To take advantage of v0.42.65.2
+
+Set the model you want in your deployment's environment (e.g. Render dashboard) instead of editing the database:
+
+```
+GBRAIN_MODELS_THINK=google:<model>
+```
+
+Saving env changes triggers a restart, which applies the value and registers it with the allowlist exemption in one step.
+
 ## [0.42.65.1] - 2026-07-25
 
 **Per-op model config keys now bypass the native-provider model allowlist, matching the documented contract.**

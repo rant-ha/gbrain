@@ -72,14 +72,17 @@ if [ -z "$PUBLIC_URL" ]; then
 fi
 
 # Keep the strongest model on reasoning/facts, and keep the high-frequency
-# chat + expansion paths on Mistral.
-bun run src/cli.ts config set models.default "litellm:gpt-5.4-mini"
-bun run src/cli.ts config set models.think "litellm:gpt-5.4-mini"
-bun run src/cli.ts config set models.chat "litellm:mistralai/mistral-medium-3.5-128b"
-bun run src/cli.ts config set models.expansion "litellm:mistralai/mistral-medium-3.5-128b"
-bun run src/cli.ts config set facts.extraction_model "litellm:gpt-5.4-mini"
-bun run src/cli.ts config set models.tier.reasoning "litellm:gpt-5.4-mini"
-bun run src/cli.ts config set models.auto_think "litellm:gpt-5.4-mini"
+# chat + expansion paths on Mistral. Every key is env-overridable from the
+# Render dashboard (GBRAIN_MODELS_*); the literal here is only the fallback
+# when the env var is unset. These run BEFORE `serve` starts, so the gateway's
+# startup allowlist-exemption sweep sees the final values.
+bun run src/cli.ts config set models.default "${GBRAIN_MODELS_DEFAULT:-litellm:gpt-5.4-mini}"
+bun run src/cli.ts config set models.think "${GBRAIN_MODELS_THINK:-${GBRAIN_MODELS_DEFAULT:-litellm:gpt-5.4-mini}}"
+bun run src/cli.ts config set models.chat "${GBRAIN_MODELS_CHAT:-litellm:mistralai/mistral-medium-3.5-128b}"
+bun run src/cli.ts config set models.expansion "${GBRAIN_MODELS_EXPANSION:-litellm:mistralai/mistral-medium-3.5-128b}"
+bun run src/cli.ts config set facts.extraction_model "${GBRAIN_FACTS_EXTRACTION_MODEL:-${GBRAIN_MODELS_DEFAULT:-litellm:gpt-5.4-mini}}"
+bun run src/cli.ts config set models.tier.reasoning "${GBRAIN_MODELS_TIER_REASONING:-${GBRAIN_MODELS_DEFAULT:-litellm:gpt-5.4-mini}}"
+bun run src/cli.ts config set models.auto_think "${GBRAIN_MODELS_AUTO_THINK:-${GBRAIN_MODELS_THINK:-${GBRAIN_MODELS_DEFAULT:-litellm:gpt-5.4-mini}}}"
 
 echo "Applying database migrations..."
 bun run src/cli.ts apply-migrations --yes --non-interactive
