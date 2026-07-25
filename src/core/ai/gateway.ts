@@ -21,7 +21,7 @@
  *     rotation (via configureGateway()) invalidates stale entries.
  */
 
-import { embed as aiEmbed, embedMany, generateObject, generateText, jsonSchema } from 'ai';
+import { embed as aiEmbed, embedMany, generateObject, generateText, jsonSchema, streamText } from 'ai';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { createHash } from 'node:crypto';
 import { listRecipes } from './recipes/index.ts';
@@ -188,6 +188,8 @@ type EmbedManyFn = typeof embedMany;
 let _embedTransport: EmbedManyFn = embedMany;
 type GenerateTextFn = typeof generateText;
 let _generateTextTransport: GenerateTextFn = generateText;
+type StreamTextFn = typeof streamText;
+let _streamTextTransport: StreamTextFn = streamText;
 // v0.41.6.0 D1: tests that install a transport stub also pass the
 // embedding-creds preflight, matching the chat-transport fast-path
 // pattern. Set when __setEmbedTransportForTests is called with a
@@ -659,6 +661,7 @@ export function resetGateway(): void {
   _shrinkState.clear();
   _embedTransport = embedMany;
   _generateTextTransport = generateText;
+  _streamTextTransport = streamText;
   _embedTransportInstalled = false;
   _chatTransport = null;
   _warnedRecipes.clear();
@@ -688,6 +691,18 @@ export function __setEmbedTransportForTests(fn: EmbedManyFn | null): void {
  */
 export function __setGenerateTextTransportForTests(fn: GenerateTextFn | null): void {
   _generateTextTransport = fn ?? generateText;
+}
+
+/**
+ * Test-only seam for the chat() streaming SDK call (ChatOpts.stream === true).
+ * Mirrors __setGenerateTextTransportForTests: provider resolution and
+ * providerOptions assembly stay live; only the final streamText call is
+ * replaced. Pass `null` to restore the real `streamText` from the AI SDK.
+ *
+ * @internal exported for tests; not part of the public gateway API.
+ */
+export function __setStreamTextTransportForTests(fn: StreamTextFn | null): void {
+  _streamTextTransport = fn ?? streamText;
 }
 
 /**
@@ -2817,6 +2832,19 @@ export interface ChatOpts {
    * ignored on providers without `supports_prompt_cache`.
    */
   cacheSystem?: boolean;
+  /**
+   * Stream the completion over SSE and aggregate the full text before
+   * returning (same ChatResult shape as the non-streaming path). Callers see
+   * no behavioral difference; the wire difference is that response bytes
+   * start flowing as the provider generates, which keeps the request alive
+   * through proxies/routers with a response-start timeout (Heroku's
+   * non-configurable 30s router cut being the motivating case — a
+   * non-streaming think synthesis that reasons+generates past 30s gets
+   * `context canceled` → 503 there). Ignored when `tools` are present:
+   * tool-call stream aggregation is not implemented, so tool callers always
+   * take the generateText path.
+   */
+  stream?: boolean;
 }
 
 /**
@@ -3343,7 +3371,7 @@ export async function chat(opts: ChatOpts): Promise<ChatResult> {
     : opts.system;
 
   try {
-    const result = await _generateTextTransport({
+    const callParams = {
       model,
       system: systemParam,
       messages: toModelMessages(repairToolPairing(opts.messages)) as any,
@@ -3354,7 +3382,25 @@ export async function chat(opts: ChatOpts): Promise<ChatResult> {
       abortSignal: withDefaultTimeout(opts.abortSignal, AI_CHAT_TIMEOUT_MS),
       providerOptions: Object.keys(providerOptions).length > 0 ? providerOptions : undefined,
       ...(requestHeaders ? { headers: requestHeaders } : {}),
-    });
+    };
+
+    // stream=true runs streamText and aggregates the finished stream into the
+    // same shape the normalization below already handles (the flat-.text
+    // fallback branch). Promise.all keeps a mid-stream error from leaving
+    // sibling promise rejections unhandled — the first rejection propagates
+    // to this try's catch and is normalized like any generateText failure.
+    // Tool callers always take generateText (see ChatOpts.stream).
+    const useStream = opts.stream === true && !(opts.tools && opts.tools.length > 0);
+    let result: any;
+    if (useStream) {
+      const s = _streamTextTransport(callParams as any);
+      const [text, usage, finishReason, providerMetadata] = await Promise.all([
+        s.text, s.usage, s.finishReason, s.providerMetadata,
+      ]);
+      result = { text, usage, finishReason, providerMetadata };
+    } else {
+      result = await _generateTextTransport(callParams as any);
+    }
 
     // Normalize blocks. Vercel SDK gives us `result.content` (an array of typed
     // parts) for v6+; fall back to text + toolCalls for older shapes.

@@ -2,6 +2,23 @@
 
 All notable changes to GBrain will be documented in this file.
 
+## [0.42.65.4] - 2026-07-25
+
+**`think` synthesis calls now stream, so long generations survive proxy response timeouts.**
+
+The synthesis call ran as a single non-streaming completion: a proxy or hosting router between gbrain and the model had to buffer the entire generation before forwarding anything, and routers with a response-start timeout (Heroku's non-configurable 30-second cut being the diagnosed case) killed every synthesis whose reasoning + generation ran past the limit — surfacing as `Service Unavailable` after 3 retries on complex questions while short questions passed. `gateway.chat()` gains an opt-in `stream` flag that runs the same request over SSE and aggregates the finished stream into the identical `ChatResult`; response bytes start flowing as the model generates, so response-start timeouts no longer bite. The think adapter (manual `think` + `auto_think`) opts in; every other chat caller (expansion, facts extraction, the subagent tool loop) is unchanged, and tool-bearing calls always take the non-streaming path.
+
+## To take advantage of v0.42.65.4
+
+`gbrain upgrade` and a server restart. No schema migrations. If complex `think` questions previously failed with `Service Unavailable` behind a proxy, re-run them — the failure mode this fixes is time-dependent, so short questions never showed it.
+
+### Itemized changes
+
+#### AI gateway
+
+- `ChatOpts.stream` — aggregated SSE streaming for tool-less chat calls, same `ChatResult` shape, same error normalization (`test/gateway-chat-stream.test.ts` pins routing, aggregation, tools-fallback, and mid-stream error normalization).
+- `runThink`'s gateway adapter passes `stream: true`.
+
 ## [0.42.65.3] - 2026-07-25
 
 **`think` output-token budget raised: 64K for non-Anthropic models, 32K for Anthropic.**

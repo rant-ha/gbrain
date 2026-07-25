@@ -750,6 +750,10 @@ async function tryBuildGatewayClient(
           system,
           messages,
           maxTokens: params.max_tokens,
+          // Aggregated streaming: response bytes flow as the model generates,
+          // so proxies/routers with a response-start timeout (Heroku's 30s
+          // router cut) don't kill long think syntheses. Same ChatResult.
+          stream: true,
         });
       } catch (e) {
         // AIConfigError at chat time = e.g. key revoked mid-run. For an EXPLICIT
