@@ -22,6 +22,15 @@ import {
 import type { BrainEngine } from '../src/core/engine.ts';
 
 function stubEngine(config: Record<string, string>): BrainEngine {
+  return {
+    getConfig: async (k: string) => config[k] ?? null,
+    listConfigKeys: async (prefix: string) =>
+      Object.keys(config).filter(k => k.startsWith(prefix)),
+  } as unknown as BrainEngine;
+}
+
+/** Engine without listConfigKeys — the pre-migration / legacy shape. */
+function stubEngineNoList(config: Record<string, string>): BrainEngine {
   return { getConfig: async (k: string) => config[k] ?? null } as unknown as BrainEngine;
 }
 
@@ -59,5 +68,50 @@ describe('reconfigureGatewayWithEngine — tier models extend the allowlist', ()
       stubEngine({ 'models.default': 'anthropic:claude-hypothetical-10' }),
     );
     expect(validateModelId('anthropic:claude-hypothetical-10').ok).toBe(true);
+  });
+
+  test('per-op keys (models.think, facts.extraction_model) extend the allowlist', async () => {
+    configureGateway({
+      embedding_model: 'openai:text-embedding-3-large',
+      embedding_dimensions: 1536,
+      env: { ANTHROPIC_API_KEY: 'sk-fake', OPENAI_API_KEY: 'sk-fake' },
+    });
+    // Pre-reconfigure: ids absent from the recipe allowlist are rejected.
+    expect(validateModelId('google:gemini-hypothetical-11').ok).toBe(false);
+
+    await reconfigureGatewayWithEngine(
+      stubEngine({
+        'models.think': 'google:gemini-hypothetical-11',
+        'models.dream.synthesize': 'anthropic:claude-hypothetical-12',
+        'facts.extraction_model': 'anthropic:claude-hypothetical-13',
+        // Alias TARGETS register too (resolveModel hands the probe the
+        // alias-resolved full id, so the target is what must validate).
+        'models.aliases.luna': 'google:gemini-hypothetical-14',
+      }),
+    );
+
+    expect(validateModelId('google:gemini-hypothetical-11').ok).toBe(true);
+    expect(validateModelId('anthropic:claude-hypothetical-12').ok).toBe(true);
+    expect(validateModelId('anthropic:claude-hypothetical-13').ok).toBe(true);
+    expect(validateModelId('google:gemini-hypothetical-14').ok).toBe(true);
+    // An id configured NOWHERE stays rejected — the allowlist still bites.
+    expect(validateModelId('google:gemini-never-configured-2').ok).toBe(false);
+  });
+
+  test('engine without listConfigKeys falls back to tier registration (no throw)', async () => {
+    configureGateway({
+      embedding_model: 'openai:text-embedding-3-large',
+      embedding_dimensions: 1536,
+      env: { ANTHROPIC_API_KEY: 'sk-fake', OPENAI_API_KEY: 'sk-fake' },
+    });
+    await reconfigureGatewayWithEngine(
+      stubEngineNoList({
+        'models.tier.deep': 'anthropic:claude-hypothetical-15',
+        'models.think': 'google:gemini-hypothetical-16',
+      }),
+    );
+    // Tier registration still lands; per-op sweep is skipped gracefully.
+    expect(validateModelId('anthropic:claude-hypothetical-15').ok).toBe(true);
+    expect(validateModelId('google:gemini-hypothetical-16').ok).toBe(false);
   });
 });

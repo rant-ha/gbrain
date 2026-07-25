@@ -2,6 +2,37 @@
 
 All notable changes to GBrain will be documented in this file.
 
+## [0.42.65.1] - 2026-07-25
+
+**Per-op model config keys now bypass the native-provider model allowlist, matching the documented contract.**
+
+Setting a per-op model key (`models.think`, `models.auto_think`, `models.dream.*`, `models.eval.*`, `facts.extraction_model`, …) to a native-provider model newer than the provider recipe's built-in list (e.g. a Gemini model the google recipe doesn't enumerate yet) used to fail `probeChatModel` at call time and silently degrade `think`/`auto_think` to the gather-only stub. The allowlist-exemption registration at startup only covered `models.default`, `models.tier.*`, and the chat/expansion/embedding/reranker keys. It now sweeps every `models.*` config key (alias targets included) plus `facts.extraction_model`, so any model you explicitly chose through config is exempt — the same contract `assertTouchpoint` already documented. Engines without `listConfigKeys` (legacy shape) fall back to the previous tier-only registration.
+
+## To take advantage of v0.42.65.1
+
+`gbrain upgrade` should do this automatically. No new schema migrations ship in this release.
+
+1. **Upgrade and restart your server** (the exemption sweep runs at startup):
+   ```bash
+   gbrain upgrade
+   ```
+2. **Point a per-op key at any provider model you use**, even if the recipe list hasn't caught up:
+   ```bash
+   gbrain config set models.think google:<your-model>
+   ```
+   Then restart the serve process once so the new key joins the exemption set.
+3. **Verify with:**
+   ```bash
+   gbrain models
+   gbrain models doctor
+   ```
+
+### Itemized changes
+
+#### AI gateway
+
+- `reconfigureGatewayWithEngine` registers every DB-config-chosen model (all `models.*` keys, alias targets, and `facts.extraction_model`) as an extended model, so per-op keys bypass the native recipe allowlist the same way `models.default` and `models.tier.*` already did. Pinned by two new cases in `test/gateway-tier-extended-models.test.ts`, including the legacy-engine graceful fallback.
+
 ## [0.42.65.0] - 2026-07-23
 
 **A large maintenance release: 93 verified fixes and small features merged since v0.42.64.0, most of them community contributions.**

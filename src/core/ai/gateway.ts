@@ -551,6 +551,30 @@ export async function reconfigureGatewayWithEngine(engine: BrainEngine): Promise
     tierModels.push(await resolveModel(engine, { tier, fallback: TIER_DEFAULTS[tier] }));
   }
 
+  // ALSO register every model chosen through the DB config plane, per-op keys
+  // included (models.think, models.auto_think, models.dream.*, models.eval.*,
+  // facts.extraction_model, ...). assertTouchpoint's contract says config-chosen
+  // models bypass the native recipe allowlist, but pre-fix only tiers +
+  // chat/expansion/embedding/reranker were registered — a per-op key pointing
+  // at a native model newer than the recipe list (e.g. `models.think` set to a
+  // Gemini the google recipe doesn't list) failed `probeChatModel` at call time
+  // and silently degraded think/auto_think to the gather-only stub. Alias
+  // targets (`models.aliases.*` values) register too: resolveModel returns the
+  // alias-resolved full id, so the target is what the probe sees. Bare alias
+  // names / malformed values are skipped by registerExtendedModel's parse guard.
+  const configModels: string[] = [];
+  try {
+    for (const key of await engine.listConfigKeys('models.')) {
+      const v = await engine.getConfig(key);
+      if (v && v.trim()) configModels.push(v.trim());
+    }
+    const factsModel = await engine.getConfig('facts.extraction_model');
+    if (factsModel && factsModel.trim()) configModels.push(factsModel.trim());
+  } catch {
+    // Config plane unavailable (pre-migration brain, transient error) — fall
+    // back to the tier + chat/expansion registration above.
+  }
+
   _config = { ...cfg, expansion_model: expansionFull, chat_model: chatFull };
   _modelCache.clear();
   _shrinkState.clear();
@@ -563,6 +587,7 @@ export async function reconfigureGatewayWithEngine(engine: BrainEngine): Promise
     _config.reranker_model,
     ...(_config.chat_fallback_chain ?? []),
     ...tierModels,
+    ...configModels,
   ]) {
     if (m) registerExtendedModel(m);
   }
